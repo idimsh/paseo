@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-1
 import type { AgentStorage, StoredAgentRecord } from "../agent-storage.js";
 interface Dependencies {
   storage: AgentStorage;
@@ -9,6 +10,8 @@ interface Dependencies {
 export function createRestartRecovery(deps: Dependencies) {
   // Candidates are chosen at startup; each settles once its resume was sent or abandoned.
   const resuming = new Map<string, { promise: Promise<void>; resolve(): void }>();
+  // Agents running when shutdown began; captured even if their turn fails during the stop.
+  const runningAtShutdown = new Set<string>();
   const eligible = async (record: StoredAgentRecord) =>
     !record.archivedAt && !record.internal && !record.owner && (await deps.eligible(record));
   async function resume(agentId: string) {
@@ -43,11 +46,25 @@ export function createRestartRecovery(deps: Dependencies) {
         }
       }
     },
+    /**
+     * Call synchronously at the start of shutdown, before any await. Claude Code and Pi turns
+     * fail within milliseconds of the stop, long before capture runs.
+     */
+    noteRunningAgents(agentIds: string[]) {
+      for (const agentId of agentIds) runningAtShutdown.add(agentId);
+      deps.storage.holdResumeMarks(agentIds);
+    },
+    /** A noted agent whose turn completed cleanly during shutdown is not resumed. */
+    forgetRunningAgent(agentId: string) {
+      if (!runningAtShutdown.delete(agentId)) return;
+      deps.storage.releaseResumeMark(agentId);
+    },
     async captureRunningAgents() {
       await deps.storage.flush();
       for (const record of await deps.storage.list()) {
-        if (record.lastStatus === "running" && (await eligible(record)))
-          await deps.storage.upsert({ ...record, resumeOnStartup: deps.settings().enabled });
+        const wasRunning = record.lastStatus === "running" || runningAtShutdown.has(record.id);
+        if (wasRunning && (await eligible(record)))
+          await deps.storage.setResumeOnStartup(record.id, deps.settings().enabled);
       }
     },
     /** Resume every candidate in the background; a slow provider holds back only its agent. */

@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-1
 import { expect, test } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -99,6 +100,55 @@ test("opt-out consumes pending recovery and excludes archived, private, owned an
     recovery.resumePending();
     expect(dispatched).toEqual([]);
     expect((await storage.list()).every((record) => !record.resumeOnStartup)).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("agents running when shutdown began are captured although their turn already failed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "restart-recovery-"));
+  try {
+    const storage = new AgentStorage(root, createTestLogger());
+    for (const [id, lastStatus] of [
+      ["claude-failed", "running"],
+      ["still-running", "running"],
+      ["finished-cleanly", "running"],
+      ["was-idle", "idle"],
+    ] as const) {
+      await storage.upsert(
+        parseStoredAgentRecord({
+          id,
+          lastStatus,
+          provider: "claude",
+          cwd: root,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }),
+      );
+    }
+    const recovery = createRestartRecovery({
+      storage,
+      settings: () => ({ enabled: true, prompt: "Resume working." }),
+      eligible: async () => true,
+      dispatch: async () => {},
+      report: () => {},
+    });
+
+    // The stop request notes what is running, before anything is torn down.
+    recovery.noteRunningAgents(["claude-failed", "still-running", "finished-cleanly"]);
+    // A Claude Code or Pi turn fails within milliseconds of the stop, before capture runs.
+    const failed = (await storage.get("claude-failed"))!;
+    await storage.upsert({ ...failed, lastStatus: "error" });
+    // Another turn completes on its own: nothing to resume.
+    const finished = (await storage.get("finished-cleanly"))!;
+    await storage.upsert({ ...finished, lastStatus: "idle" });
+    recovery.forgetRunningAgent("finished-cleanly");
+    await recovery.captureRunningAgents();
+
+    expect((await storage.get("claude-failed"))?.resumeOnStartup).toBe(true);
+    expect((await storage.get("still-running"))?.resumeOnStartup).toBe(true);
+    expect((await storage.get("finished-cleanly"))?.resumeOnStartup).not.toBe(true);
+    expect((await storage.get("was-idle"))?.resumeOnStartup).not.toBe(true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

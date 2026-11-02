@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-1
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
@@ -816,7 +817,19 @@ class FakeAgentSession implements AgentSession {
         this.notifySubscribers(assistantChunkB);
       }
 
-      await this.beforeTurnComplete?.(prompt);
+      try {
+        await this.beforeTurnComplete?.(prompt);
+      } catch (error) {
+        // A provider whose turn is torn down reports it as a failed turn.
+        const failed: AgentStreamEvent = {
+          type: "turn_failed",
+          provider: this.providerName,
+          error: error instanceof Error ? error.message : String(error),
+        };
+        await this.appendHistoryEvent(failed);
+        this.notifySubscribers(failed);
+        return;
+      }
       const completed: AgentStreamEvent = {
         type: "turn_completed",
         provider: this.providerName,

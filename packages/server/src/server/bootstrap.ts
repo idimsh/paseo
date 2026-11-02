@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-1
 import { createRestartRecovery } from "./agent/restart-recovery/index.js";
 import { sendPromptToAgent } from "./agent/agent-prompt.js";
 import { createIdleRuntimeCleanup } from "./agent/idle-runtime-cleanup/index.js";
@@ -1965,6 +1966,23 @@ export async function createPaseoDaemon(
   };
 
   const stop = async (options?: { keepTerminals?: boolean }) => {
+    // Before the first await: turns torn down by the stop fail within milliseconds. A turn
+    // that completes cleanly before capture is forgotten; a failed or canceled one keeps its mark.
+    const noteRunningAgents = () =>
+      restartRecovery.noteRunningAgents(
+        agentManager
+          .listAgents()
+          .filter((agent) => agentManager.hasInFlightRun(agent.id))
+          .map((agent) => agent.id),
+      );
+    noteRunningAgents();
+    const unsubscribeTurnOutcomes = agentManager.subscribe(
+      (event) => {
+        if (event.type === "agent_stream" && event.event.type === "turn_completed")
+          restartRecovery.forgetRunningAgent(event.agentId);
+      },
+      { replayState: false },
+    );
     const keepTerminals = options?.keepTerminals === true;
     let terminalShutdownError: unknown = null;
     localCredential = null;
@@ -1985,8 +2003,11 @@ export async function createPaseoDaemon(
     await finishSubscriptions.close();
     await wsServer?.agentMessages.close();
     agentManager.prepareForShutdown();
+    // Ingress is frozen now; note turns that started after the first note.
+    noteRunningAgents();
     await restartRecovery.captureRunningAgents();
     await closeAllAgents(logger, agentManager);
+    unsubscribeTurnOutcomes();
     await withTimeout({
       promise: pluginRuntime.drainEvents(),
       timeoutMs: AGENT_CLOSE_TIMEOUT_MS,

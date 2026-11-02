@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-1
 import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
@@ -104,6 +105,7 @@ export class AgentStorage {
   private deleting: Set<string> = new Set();
   private daemonAgentIdsByExecution: Map<string, string> = new Map();
   private daemonExecutionKeysByAgentId: Map<string, string> = new Map();
+  private heldResumeMarks: Set<string> = new Set();
   private loaded = false;
   private baseDir: string;
   private loadPromise: Promise<StoredAgentRecord[]> | null = null;
@@ -239,6 +241,29 @@ export class AgentStorage {
     this.pathsById.delete(agentId);
   }
 
+  /**
+   * Keeps these agents' resume marks through later snapshots. Shutdown holds the agents that were
+   * running when it began: a Claude Code or Pi turn fails as the stop tears it down, and the
+   * idle or error snapshot that follows must not cancel the resume.
+   */
+  holdResumeMarks(agentIds: Iterable<string>): void {
+    for (const agentId of agentIds) this.heldResumeMarks.add(agentId);
+  }
+
+  /** An agent whose turn finished cleanly during shutdown has nothing to resume. */
+  releaseResumeMark(agentId: string): void {
+    this.heldResumeMarks.delete(agentId);
+  }
+
+  /** Sets only `resumeOnStartup`, on the record as it stands, so a newer snapshot is kept. */
+  async setResumeOnStartup(agentId: string, resumeOnStartup: boolean): Promise<void> {
+    await this.load();
+    await this.queueRecordMutation(agentId, (existing) => {
+      if (!existing) throw new Error(`Agent ${agentId} not found`);
+      return { ...existing, resumeOnStartup };
+    });
+  }
+
   async applySnapshot(
     agent: ManagedAgent,
     options?: { title?: string | null; internal?: boolean },
@@ -261,8 +286,9 @@ export class AgentStorage {
       if (existing && existing.archivedAt !== undefined) {
         record.archivedAt = existing.archivedAt;
       }
-      record.resumeOnStartup =
-        existing?.resumeOnStartup && agent.lifecycle !== "idle" && agent.lifecycle !== "error";
+      record.resumeOnStartup = this.heldResumeMarks.has(agent.id)
+        ? existing?.resumeOnStartup
+        : existing?.resumeOnStartup && agent.lifecycle !== "idle" && agent.lifecycle !== "error";
       return record;
     });
   }

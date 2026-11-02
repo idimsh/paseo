@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-1
 import { describe, expect, test, beforeEach, afterEach } from "vitest";
 import os from "node:os";
 import path from "node:path";
@@ -146,6 +147,45 @@ describe("AgentStorage", () => {
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("a snapshot that turns an agent idle or errored clears its resume mark unless the mark is held", async () => {
+    for (const id of ["held", "free"]) {
+      await storage.applySnapshot(createManagedAgent({ id, lifecycle: "running" }));
+      const record = (await storage.get(id))!;
+      await storage.upsert({ ...record, resumeOnStartup: true });
+    }
+    // Shutdown holds the marks of agents that were running when it began (idimsh/paseo PC-1).
+    storage.holdResumeMarks(["held"]);
+
+    await storage.applySnapshot(createManagedAgent({ id: "held", lifecycle: "error" }));
+    await storage.applySnapshot(createManagedAgent({ id: "free", lifecycle: "error" }));
+
+    expect((await storage.get("held"))?.resumeOnStartup).toBe(true);
+    expect((await storage.get("free"))?.resumeOnStartup).toBe(false);
+  });
+
+  test("a released resume mark is cleared by the next idle snapshot", async () => {
+    await storage.applySnapshot(createManagedAgent({ id: "finished", lifecycle: "running" }));
+    await storage.upsert({ ...(await storage.get("finished"))!, resumeOnStartup: true });
+    storage.holdResumeMarks(["finished"]);
+    storage.releaseResumeMark("finished");
+
+    await storage.applySnapshot(createManagedAgent({ id: "finished", lifecycle: "idle" }));
+
+    expect((await storage.get("finished"))?.resumeOnStartup).toBe(false);
+  });
+
+  test("setResumeOnStartup changes only the mark, on the record as it now stands", async () => {
+    await storage.applySnapshot(createManagedAgent({ id: "agent-1", lifecycle: "running" }));
+    await storage.applySnapshot(createManagedAgent({ id: "agent-1", lifecycle: "error" }));
+
+    await storage.setResumeOnStartup("agent-1", true);
+
+    expect(await storage.get("agent-1")).toMatchObject({
+      resumeOnStartup: true,
+      lastStatus: "error",
+    });
   });
 
   test("applySnapshot persists configs and snapshot metadata", async () => {

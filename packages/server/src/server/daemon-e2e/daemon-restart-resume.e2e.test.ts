@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-1
 import { AgentStorage } from "../agent/agent-storage.js";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -308,6 +309,60 @@ test.each([false, true])(
   },
   60000,
 );
+
+test("an agent whose turn fails as shutdown tears it down still resumes after the restart", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "resume-failed-on-stop-process-"));
+  const processes: ChildProcess[] = [];
+  let client: DaemonClient | undefined;
+  try {
+    const first = await restartFixture(root);
+    processes.push(first.child);
+    client = new DaemonClient({ url: `ws://127.0.0.1:${first.port}/ws`, appVersion: "0.13.0" });
+    await client.connect();
+    const working = await client.createAgent({
+      provider: "claude",
+      cwd: first.cwd,
+      modeId: "full-access",
+    });
+    await client.sendMessage(working.id, "FAIL_ON_STOP");
+    await expect
+      .poll(
+        async () =>
+          (
+            await new AgentStorage(path.join(first.paseoHome, "agents"), createTestLogger()).get(
+              working.id,
+            )
+          )?.lastStatus,
+      )
+      .toBe("running");
+    await client.close();
+    client = undefined;
+    await stopFixture(first.child, false);
+    expect(
+      (
+        await new AgentStorage(path.join(first.paseoHome, "agents"), createTestLogger()).get(
+          working.id,
+        )
+      )?.resumeOnStartup,
+    ).toBe(true);
+
+    const second = await restartFixture(root);
+    processes.push(second.child);
+    await expect
+      .poll(async () =>
+        (await readFile(path.join(root, "all-prompts.jsonl"), "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line).prompt)
+          .filter((prompt) => prompt === "Resume working."),
+      )
+      .toHaveLength(1);
+  } finally {
+    await client?.close();
+    for (const child of processes.toReversed()) await stopFixture(child, true);
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30000);
 
 test("a provider that is slow to reopen does not hold daemon startup", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "resume-background-process-"));

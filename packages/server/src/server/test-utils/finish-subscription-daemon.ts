@@ -9,6 +9,9 @@ const root = process.argv[2];
 if (!root || !process.send) throw new Error("Expected isolated test home and IPC parent");
 await mkdir(join(root, "static"), { recursive: true });
 const held = Promise.withResolvers<void>();
+// Modified in idimsh/paseo: PC-1. A FAIL_ON_STOP turn fails once shutdown begins, as Claude
+// Code and Pi turns do when the daemon tears them down.
+const stopping = Promise.withResolvers<void>();
 const fixture = JSON.parse(process.argv[4] ?? "{}") as { holdResume?: boolean };
 const resumeReleased = Promise.withResolvers<void>();
 if (!fixture.holdResume) resumeReleased.resolve();
@@ -27,8 +30,13 @@ const daemon = await createTestPaseoDaemon({
       }
     },
     beforeResumeSession: () => resumeReleased.promise,
-    beforeTurnComplete: (prompt) =>
-      String(prompt).includes("HOLD_CHILD") ? held.promise : Promise.resolve(),
+    beforeTurnComplete: (prompt) => {
+      if (String(prompt).includes("FAIL_ON_STOP"))
+        return stopping.promise.then(() => {
+          throw new Error("query operation did not settle cleanly");
+        });
+      return String(prompt).includes("HOLD_CHILD") ? held.promise : Promise.resolve();
+    },
   }),
 });
 process.send({ port: daemon.port, paseoHome: daemon.paseoHome, cwd: daemon.staticDir });
@@ -36,6 +44,7 @@ process.on("message", (message) => {
   if (message === "finish") held.resolve();
   if (message === "release-resume") resumeReleased.resolve();
   if (message === "stop") {
+    stopping.resolve();
     void daemon.close().then(
       () => process.exit(0),
       (error) => {
