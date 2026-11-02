@@ -926,6 +926,18 @@ describe("ClaudeAgentSession features", () => {
     }
   });
 
+  test("a tool that asked only because of the mode is answered once its rule is allowed", async () => {
+    const empty = { settings: { permissions: { allow: [], ask: [], deny: [] } } };
+    const { session, request, result } = await requestPermission(empty, "Bash", [SUGGESTION]);
+    try {
+      expect(request.actions?.map((action) => action.id)).toContain("allow_always");
+      await session.updatePermissionPolicy!({ allow: ["Bash(npm test:*)"], ask: [], deny: [] });
+      await expect(result).resolves.toMatchObject({ behavior: "allow" });
+    } finally {
+      await session.close();
+    }
+  });
+
   test("a rule that was allowed and asked is answered once the ask rule goes", async () => {
     const both = { settings: { permissions: { allow: [SET_MODE], ask: [SET_MODE] } } };
     const { session, result } = await requestPermission(both, SET_MODE);

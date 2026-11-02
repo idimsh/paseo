@@ -47,8 +47,10 @@ export function findPolicyProvider(
     seen.add(id);
     const entry = asRecord(providers[id]);
     if (!entry) return null;
-    if (entry.options !== undefined) {
-      const permissions = permissionsOf(entry.options);
+    // The registry reads `options ?? params` (COMPAT providerParams).
+    const options = entry.options ?? entry.params;
+    if (options !== undefined) {
+      const permissions = permissionsOf(options);
       return permissions ? { id, permissions } : null;
     }
     const parent: unknown = entry.extends;
@@ -94,9 +96,20 @@ export function ruleAllows(allowRule: string, rule: string): boolean {
   }
   if (toolOf(allowRule) !== tool) return false;
   if (allowRule === tool) return true;
+  if (rule === tool) return false;
   const allowSpecifier = specifierOf(allowRule);
-  const prefix = allowSpecifier.replace(/(?::\*|\*+)$/, "");
-  return rule !== tool && prefix !== allowSpecifier && specifierOf(rule).startsWith(prefix);
+  const specifier = specifierOf(rule);
+  // `cmd:*` covers `cmd` followed by a word boundary only, so `npm test:*` does not cover `npm testing`.
+  if (allowSpecifier.endsWith(":*")) {
+    const command = allowSpecifier.slice(0, -2);
+    return (
+      specifier === command ||
+      specifier.startsWith(`${command} `) ||
+      specifier.startsWith(`${command}:`)
+    );
+  }
+  const prefix = allowSpecifier.replace(/\*+$/, "");
+  return prefix !== allowSpecifier && specifier.startsWith(prefix);
 }
 
 export function allowRulesInPolicy(
@@ -176,12 +189,13 @@ export function planAllowAlways(input: {
   const agent = input.agentManager.getAgent(input.agentId);
   const request = agent?.pendingPermissions.get(input.requestId);
   if (!agent || !request) throw new Error(`No pending permission ${input.requestId}`);
-  const providers = input.config.get().providers as ProviderEntries;
-  const policy = findPolicyProvider(providers, agent.provider);
-  if (!policy) return null;
+  // An agent created with its own permission rules runs with those, not the provider's.
   if (hasOwnPermissions(agent)) {
     throw new Error("This agent has its own permission rules; change them by hand");
   }
+  const providers = input.config.get().providers as ProviderEntries;
+  const policy = findPolicyProvider(providers, agent.provider);
+  if (!policy) return null;
   const rules = rulesForPermissionRequest(request);
   const moved = allowRulesInPolicy(policy.permissions, rules);
   if (!moved.ok) throw new Error(moved.reason);
@@ -207,11 +221,12 @@ export async function commitAllowAlways(input: {
     if (!moved.ok) throw new Error(moved.reason);
     const entries = { ...providers };
     const entry = asRecord(entries[policy.id]) ?? {};
-    const options = asRecord(entry.options) ?? {};
+    const key = entry.options === undefined && entry.params !== undefined ? "params" : "options";
+    const options = asRecord(entry[key]) ?? {};
     const settings = asRecord(options.settings) ?? {};
     entries[policy.id] = {
       ...entry,
-      options: { ...options, settings: { ...settings, permissions: moved.permissions } },
+      [key]: { ...options, settings: { ...settings, permissions: moved.permissions } },
     };
     written = { permissions: moved.permissions, providers: entries };
     return { providers: entries } as MutableDaemonConfigPatch;

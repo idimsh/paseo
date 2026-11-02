@@ -42,6 +42,17 @@ describe("finding the provider entry that holds a permission policy", () => {
     expect(findPolicyProvider(providers, "claude-zai")).toBeNull();
   });
 
+  it("reads an entry's policy from `params` as the registry does (COMPAT providerParams)", () => {
+    const providers = {
+      work: { extends: "claude", params: { settings: { permissions: { ask: ["Bash"] } } } },
+      claude: { options: { settings: { permissions: { ask: [SET_MODE] } } } },
+    };
+    expect(findPolicyProvider(providers, "work")).toEqual({
+      id: "work",
+      permissions: { ask: ["Bash"] },
+    });
+  });
+
   it("finds none without a policy, without providers, or in an extends cycle", () => {
     expect(findPolicyProvider({ claude: {} }, "claude")).toBeNull();
     expect(findPolicyProvider(undefined, "claude")).toBeNull();
@@ -115,6 +126,9 @@ describe("whether an allow rule covers a call", () => {
     expect(ruleAllows("mcp__paseo__*", SET_MODE)).toBe(true);
     expect(ruleAllows("Bash", "Bash(npm test)")).toBe(true);
     expect(ruleAllows("Bash(npm test:*)", "Bash(npm test -- --watch)")).toBe(true);
+    expect(ruleAllows("Bash(npm test:*)", "Bash(npm test:*)")).toBe(true);
+    expect(ruleAllows("Bash(npm test:*)", "Bash(npm testing-evil:*)")).toBe(false);
+    expect(ruleAllows("Read(./docs/**)", "Read(./docs/a.md)")).toBe(true);
     expect(ruleAllows("Bash(npm test:*)", "Bash")).toBe(false);
     expect(ruleAllows("Bash(npm test:*)", "Bash(git push)")).toBe(false);
     expect(ruleAllows("mcp__other", SET_MODE)).toBe(false);
@@ -250,6 +264,29 @@ describe("saving 'Allow, don't ask again'", () => {
     expect(() => planAllowAlways({ ...env, agentId: "own-rules", requestId: "mode" })).toThrow(
       "its own permission rules",
     );
+  });
+
+  it("refuses an agent with its own permission rules even when its provider has no policy", () => {
+    const env = setup({ ask: [SET_MODE] });
+    env.agents[2]!.provider = "claude";
+    expect(() => planAllowAlways({ ...env, agentId: "own-rules", requestId: "mode" })).toThrow(
+      "its own permission rules",
+    );
+  });
+
+  it("writes the move into `params` when that is where the entry keeps its options", async () => {
+    const env = setup({ ask: [SET_MODE] });
+    const entry = env.providers()["claude-director"] as { options: unknown };
+    (env.providers() as Record<string, unknown>)["claude-director"] = {
+      extends: "claude",
+      params: entry.options,
+    };
+    const plan = planAllowAlways({ ...env, agentId: "director-1", requestId: "mode" })!;
+    await commitAllowAlways({ ...env, plan });
+    expect(env.providers()["claude-director"]).toEqual({
+      extends: "claude",
+      params: { settings: { permissions: { allow: [SET_MODE], ask: [] } } },
+    });
   });
 
   it("plans nothing for an agent whose provider has no policy", () => {

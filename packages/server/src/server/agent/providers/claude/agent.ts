@@ -2405,6 +2405,7 @@ class ClaudeAgentSession implements AgentSession {
   // The ask rules the running query was launched with (PC-8): Claude Code keeps them until the
   // query relaunches, so requests the current policy now allows are answered here.
   private launchAskRules = new Set<string>();
+  private launchAllowRules = new Set<string>();
   private pendingInterruptAbort = false;
   /**
    * Whether Claude's main session is inside one of its own turns: set by system/init and by a
@@ -2902,13 +2903,16 @@ class ClaudeAgentSession implements AgentSession {
     }
   }
 
-  /** Allowed by the current policy, though the running query still asks for it. */
+  /** Allowed by the current policy, though the running query does not apply that yet. */
   private allowedInSession(request: Pick<AgentPermissionRequest, "name" | "suggestions">): boolean {
     const policy = this.config.providerOptions.settings?.permissions;
-    if (!policy || this.launchAskRules.size === 0) return false;
+    if (!policy) return false;
     const stillAsked = new Set(policy.ask ?? []);
+    // Rules the running query does not apply yet: allowed since launch, or freed from an ask rule.
     const answered = (policy.allow ?? []).filter(
-      (rule) => this.launchAskRules.has(rule) && !stillAsked.has(rule),
+      (rule) =>
+        (!this.launchAllowRules.has(rule) || this.launchAskRules.has(rule)) &&
+        !stillAsked.has(rule),
     );
     if (answered.length === 0) return false;
     return rulesForPermissionRequest(request).every((rule) =>
@@ -3611,6 +3615,7 @@ class ClaudeAgentSession implements AgentSession {
     // A fresh Claude process has no turn of its own in flight.
     this.mainTurnInFlight = false;
     this.launchAskRules = new Set(this.config.providerOptions.settings?.permissions?.ask ?? []);
+    this.launchAllowRules = new Set(this.config.providerOptions.settings?.permissions?.allow ?? []);
     this.query = claudeQuery(
       { prompt: input.iterable, options },
       {

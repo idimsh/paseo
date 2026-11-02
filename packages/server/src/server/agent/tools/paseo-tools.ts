@@ -15,7 +15,12 @@ import { z } from "zod";
 import { ensureValidJson } from "../../json-utils.js";
 import type { Logger } from "pino";
 
-import type { AgentMode, AgentProvider, AgentSessionConfig } from "../agent-sdk-types.js";
+import type {
+  AgentMode,
+  AgentPermissionResponse,
+  AgentProvider,
+  AgentSessionConfig,
+} from "../agent-sdk-types.js";
 import type { AgentManager } from "../agent-manager.js";
 import { ActiveTurnBehaviorSchema, AgentProfileSchema } from "@getpaseo/protocol/messages";
 import type { DaemonConfigStore } from "../../daemon-config-store.js";
@@ -3258,6 +3263,26 @@ function createToolCatalog(
     },
   );
 
+  // An agent's answer to a Claude prompt is a one-time answer: saving rules, through "Allow, don't
+  // ask again" or permission updates, is the operator's (PC-8). Other providers use their own
+  // action ids, so their answers pass unchanged.
+  function oneTimeAnswer(
+    agentId: string,
+    requestId: string,
+    response: AgentPermissionResponse,
+  ): AgentPermissionResponse {
+    const request = agentManager.getAgent(agentId)?.pendingPermissions.get(requestId);
+    if (request?.provider !== "claude" || response.behavior !== "allow") return response;
+    return {
+      ...response,
+      selectedActionId:
+        response.selectedActionId === ALLOW_ALWAYS_ACTION_ID
+          ? undefined
+          : response.selectedActionId,
+      updatedPermissions: undefined,
+    };
+  }
+
   registerTool(
     "respond_to_permission",
     {
@@ -3278,11 +3303,7 @@ function createToolCatalog(
         agentManager,
         agentId,
         requestId,
-        // An agent's answer is a one-time allow: "don't ask again" is the operator's (PC-8).
-        response:
-          response.behavior === "allow" && response.selectedActionId === ALLOW_ALWAYS_ACTION_ID
-            ? { ...response, selectedActionId: undefined }
-            : response,
+        response: oneTimeAnswer(agentId, requestId, response),
         logger: childLogger,
       });
       return {

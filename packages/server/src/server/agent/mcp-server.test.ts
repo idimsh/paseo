@@ -5997,25 +5997,48 @@ describe("stop MCP tools across hosts", () => {
 });
 
 describe("respond_to_permission MCP tool", () => {
-  it("answers an agent's 'Allow, don't ask again' as a one-time allow (PC-8)", async () => {
+  async function respond(provider: string, response: Record<string, unknown>) {
     const deps = createTestDeps();
+    deps.spies.agentManager.getAgent.mockReturnValue({
+      pendingPermissions: new Map([["request-1", { provider }]]),
+    });
     const server = await createAgentMcpServer({
       agentManager: deps.agentManager,
       agentStorage: deps.agentStorage,
       providerSnapshotManager: createClaudeOnlyManager(),
       logger: createTestLogger(),
     });
-
     await registeredTool(server, "respond_to_permission").handler({
       agentId: "child",
       requestId: "request-1",
-      response: { behavior: "allow", selectedActionId: "allow_always" },
+      response,
     });
+    return deps.spies.agentManager.respondToPermission.mock.calls[0]?.[2];
+  }
+  const rule = {
+    type: "addRules",
+    rules: [{ toolName: "Bash" }],
+    behavior: "allow",
+    destination: "session",
+  };
 
-    expect(deps.spies.agentManager.respondToPermission).toHaveBeenCalledWith("child", "request-1", {
+  it("answers an agent's reply to a Claude prompt as a one-time allow (PC-8)", async () => {
+    expect(
+      await respond("claude", {
+        behavior: "allow",
+        selectedActionId: "allow_always",
+        updatedPermissions: [rule],
+      }),
+    ).toEqual({ behavior: "allow", selectedActionId: undefined, updatedPermissions: undefined });
+  });
+
+  it("passes other providers' answers unchanged; their action ids are their own", async () => {
+    const answer = {
       behavior: "allow",
-      selectedActionId: undefined,
-    });
+      selectedActionId: "allow_always",
+      updatedPermissions: [rule],
+    };
+    expect(await respond("opencode", answer)).toEqual(answer);
   });
 });
 
