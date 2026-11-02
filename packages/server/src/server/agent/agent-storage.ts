@@ -258,6 +258,7 @@ export class AgentStorage {
   /** Sets only `resumeOnStartup`, on the record as it stands, so a newer snapshot is kept. */
   async setResumeOnStartup(agentId: string, resumeOnStartup: boolean): Promise<void> {
     await this.load();
+    if (!this.cache.has(agentId)) return;
     await this.queueRecordMutation(agentId, (existing) => {
       if (!existing) throw new Error(`Agent ${agentId} not found`);
       return { ...existing, resumeOnStartup };

@@ -63,8 +63,11 @@ export function createRestartRecovery(deps: Dependencies) {
       await deps.storage.flush();
       for (const record of await deps.storage.list()) {
         const wasRunning = record.lastStatus === "running" || runningAtShutdown.has(record.id);
-        if (wasRunning && (await eligible(record)))
-          await deps.storage.setResumeOnStartup(record.id, deps.settings().enabled);
+        if (!wasRunning || !(await eligible(record))) continue;
+        // One record that cannot be written must not stop the capture or the shutdown after it.
+        await deps.storage
+          .setResumeOnStartup(record.id, deps.settings().enabled)
+          .catch((error) => deps.report(record.id, error));
       }
     },
     /** Resume every candidate in the background; a slow provider holds back only its agent. */

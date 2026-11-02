@@ -176,6 +176,11 @@ describe("AgentStorage", () => {
     expect((await storage.get("finished"))?.resumeOnStartup).toBe(false);
   });
 
+  test("setResumeOnStartup on a record that is gone does nothing", async () => {
+    await expect(storage.setResumeOnStartup("gone", true)).resolves.toBeUndefined();
+    expect(await storage.get("gone")).toBeNull();
+  });
+
   test("setResumeOnStartup changes only the mark, on the record as it now stands", async () => {
     await storage.applySnapshot(createManagedAgent({ id: "agent-1", lifecycle: "running" }));
     await storage.applySnapshot(createManagedAgent({ id: "agent-1", lifecycle: "error" }));

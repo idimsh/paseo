@@ -1976,10 +1976,15 @@ export async function createPaseoDaemon(
           .map((agent) => agent.id),
       );
     noteRunningAgents();
+    // Until capture, an agent someone closes (kill_agent) is forgotten too; after capture the
+    // closes come from this shutdown and keep their mark.
+    let captured = false;
     const unsubscribeTurnOutcomes = agentManager.subscribe(
       (event) => {
         if (event.type === "agent_stream" && event.event.type === "turn_completed")
           restartRecovery.forgetRunningAgent(event.agentId);
+        if (!captured && event.type === "agent_state" && event.agent.lifecycle === "closed")
+          restartRecovery.forgetRunningAgent(event.agent.id);
       },
       { replayState: false },
     );
@@ -2006,6 +2011,7 @@ export async function createPaseoDaemon(
     // Ingress is frozen now; note turns that started after the first note.
     noteRunningAgents();
     await restartRecovery.captureRunningAgents();
+    captured = true;
     await closeAllAgents(logger, agentManager);
     unsubscribeTurnOutcomes();
     await withTimeout({
