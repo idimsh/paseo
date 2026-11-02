@@ -6,6 +6,7 @@ import {
   commitAllowAlways,
   findPolicyProvider,
   planAllowAlways,
+  ruleAllows,
   rulesForPermissionRequest,
   toolRuleSuggestions,
 } from "./permission-policy.js";
@@ -104,6 +105,19 @@ describe("moving rules from ask to allow", () => {
     expect(allowRulesInPolicy({ ask: ["Bash(git push:*)"] }, ["Bash(npm test:*)"])).toMatchObject({
       ok: true,
     });
+  });
+});
+
+describe("whether an allow rule covers a call", () => {
+  it("matches whole tools, MCP servers and wildcard prefixes", () => {
+    expect(ruleAllows(SET_MODE, SET_MODE)).toBe(true);
+    expect(ruleAllows("mcp__paseo", SET_MODE)).toBe(true);
+    expect(ruleAllows("mcp__paseo__*", SET_MODE)).toBe(true);
+    expect(ruleAllows("Bash", "Bash(npm test)")).toBe(true);
+    expect(ruleAllows("Bash(npm test:*)", "Bash(npm test -- --watch)")).toBe(true);
+    expect(ruleAllows("Bash(npm test:*)", "Bash")).toBe(false);
+    expect(ruleAllows("Bash(npm test:*)", "Bash(git push)")).toBe(false);
+    expect(ruleAllows("mcp__other", SET_MODE)).toBe(false);
   });
 });
 

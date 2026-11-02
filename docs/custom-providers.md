@@ -67,8 +67,9 @@ A Claude provider whose `options.settings.permissions` holds Claude Code permiss
 saving its rule would stop the prompt. The rule is Claude's suggested rule for that tool, else the
 tool name. Answering with it from the app or the CLI first checks the move, then answers, then moves
 the rule out of `ask` and into `allow` in the provider entry whose options define the policy (an
-entry with its own `options` does not inherit its parent's), writes the daemon config, and applies
-the new policy to the running sessions that use it. It refuses, changing nothing, while another
+entry with its own `options` does not inherit its parent's), writes the daemon config, and hands
+the new policy to the running sessions that use it: they answer requests it allows (waiting ones
+included) until their query next launches with it, without a restart. It refuses, changing nothing, while another
 `ask` rule (for example `mcp__paseo__*` or `Bash(git:*)`) would keep prompting, and for an agent
 created with its own permission rules. An agent answering through the MCP `respond_to_permission`
 tool gives a one-time allow. Without a policy, the action saves Claude's suggested rules for the

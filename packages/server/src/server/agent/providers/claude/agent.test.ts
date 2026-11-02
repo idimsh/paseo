@@ -802,7 +802,7 @@ describe("ClaudeAgentSession features", () => {
     // Closing the session rejects a request the test did not answer.
     result.catch(() => undefined);
     const [request] = session.getPendingPermissions();
-    return { session, request: request!, result, queryMock, launches };
+    return { session, request: request!, result, queryMock, launches, queryFactory };
   }
 
   const policy = { settings: { permissions: { allow: [], ask: [SET_MODE], deny: ["Bash"] } } };
@@ -910,17 +910,62 @@ describe("ClaudeAgentSession features", () => {
     }
   });
 
-  test("applies a changed policy to the running query and to later launches", async () => {
-    const { session, request, queryMock } = await requestPermission(policy, SET_MODE);
+  test("a changed policy answers the waiting request and later ones in this session", async () => {
+    const { session, result, queryFactory } = await requestPermission(policy, SET_MODE);
     const next = { allow: [SET_MODE], ask: [], deny: ["Bash"] };
     try {
       await session.updatePermissionPolicy!(next);
-      expect(queryMock.applyFlagSettings).toHaveBeenCalledWith({ permissions: next });
-      await session.respondToPermission(request.id, { behavior: "allow" });
-      expect(
-        (session as unknown as { config: { providerOptions: { settings: unknown } } }).config
-          .providerOptions.settings,
-      ).toEqual({ permissions: next });
+      await expect(result).resolves.toMatchObject({ behavior: "allow" });
+      expect(session.getPendingPermissions()).toEqual([]);
+      const canUseTool = queryFactory.mock.calls[0]?.[0].options.canUseTool;
+      await expect(
+        canUseTool(SET_MODE, {}, { signal: new AbortController().signal, toolUseID: "tool-2" }),
+      ).resolves.toEqual({ behavior: "allow", updatedInput: {} });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("a rule that was allowed and asked is answered once the ask rule goes", async () => {
+    const both = { settings: { permissions: { allow: [SET_MODE], ask: [SET_MODE] } } };
+    const { session, result } = await requestPermission(both, SET_MODE);
+    try {
+      await session.updatePermissionPolicy!({ allow: [SET_MODE], ask: [] });
+      await expect(result).resolves.toMatchObject({ behavior: "allow" });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("a rule put back into ask prompts again", async () => {
+    const { session, result, queryFactory } = await requestPermission(policy, SET_MODE);
+    try {
+      await session.updatePermissionPolicy!({ allow: [SET_MODE], ask: [] });
+      await result;
+      await session.updatePermissionPolicy!({ allow: [], ask: [SET_MODE] });
+      const canUseTool = queryFactory.mock.calls[0]?.[0].options.canUseTool;
+      void canUseTool(
+        SET_MODE,
+        {},
+        { signal: new AbortController().signal, toolUseID: "tool-3" },
+      ).catch(() => undefined);
+      expect(session.getPendingPermissions().map((request) => request.name)).toEqual([SET_MODE]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("the next launch of the query carries the changed policy", async () => {
+    const { session } = await requestPermission(policy, SET_MODE);
+    const next = { allow: [SET_MODE], ask: [], deny: ["Bash"] };
+    try {
+      await session.updatePermissionPolicy!(next);
+      const launch = await (
+        session as unknown as {
+          buildOptions(mode: string): Promise<{ settings?: { permissions?: unknown } }>;
+        }
+      ).buildOptions("default");
+      expect(launch.settings?.permissions).toEqual(next);
     } finally {
       await session.close();
     }

@@ -5,6 +5,7 @@ import { validateProviderOptions } from "../../provider-options.js";
 import {
   ALLOW_ALWAYS_ACTION_ID,
   allowRulesInPolicy,
+  ruleAllows,
   rulesForPermissionRequest,
   toolRuleSuggestions,
 } from "../../permission-policy.js";
@@ -2401,6 +2402,9 @@ class ClaudeAgentSession implements AgentSession {
   private compactionMarkerOpen = false;
   private queryPumpPromise: Promise<void> | null = null;
   private queryRestartNeeded = false;
+  // The ask rules the running query was launched with (PC-8): Claude Code keeps them until the
+  // query relaunches, so requests the current policy now allows are answered here.
+  private launchAskRules = new Set<string>();
   private pendingInterruptAbort = false;
   /**
    * Whether Claude's main session is inside one of its own turns: set by system/init and by a
@@ -2869,6 +2873,12 @@ class ClaudeAgentSession implements AgentSession {
     return this.config.providerOptions.settings?.permissions !== undefined;
   }
 
+  /**
+   * Takes a new policy for later launches. The running query keeps the ask rules it was launched
+   * with (Claude Code merges settings sources, so a flag update cannot drop one), and relaunching
+   * it would end its background tasks; so requests the new policy allows are answered here,
+   * including any already waiting.
+   */
   async updatePermissionPolicy(permissions: Record<string, unknown>): Promise<void> {
     const providerOptions = this.config.providerOptions;
     this.config.providerOptions = {
@@ -2878,7 +2888,32 @@ class ClaudeAgentSession implements AgentSession {
         permissions: permissions as NonNullable<ClaudeProviderOptions["settings"]>["permissions"],
       },
     };
-    await this.query?.applyFlagSettings({ permissions });
+    for (const [requestId, pending] of this.pendingPermissions) {
+      if (pending.request.kind !== "tool" || !this.allowedInSession(pending.request)) continue;
+      this.pendingPermissions.delete(requestId);
+      pending.cleanup?.();
+      pending.resolve({ behavior: "allow", updatedInput: pending.request.input ?? {} });
+      this.pushEvent({
+        type: "permission_resolved",
+        provider: "claude",
+        requestId,
+        resolution: { behavior: "allow" },
+      });
+    }
+  }
+
+  /** Allowed by the current policy, though the running query still asks for it. */
+  private allowedInSession(request: Pick<AgentPermissionRequest, "name" | "suggestions">): boolean {
+    const policy = this.config.providerOptions.settings?.permissions;
+    if (!policy || this.launchAskRules.size === 0) return false;
+    const stillAsked = new Set(policy.ask ?? []);
+    const answered = (policy.allow ?? []).filter(
+      (rule) => this.launchAskRules.has(rule) && !stillAsked.has(rule),
+    );
+    if (answered.length === 0) return false;
+    return rulesForPermissionRequest(request).every((rule) =>
+      answered.some((allowRule) => ruleAllows(allowRule, rule)),
+    );
   }
 
   getPendingPermissions(): AgentPermissionRequest[] {
@@ -3575,6 +3610,7 @@ class ClaudeAgentSession implements AgentSession {
     this.runtimeSafety.reset();
     // A fresh Claude process has no turn of its own in flight.
     this.mainTurnInFlight = false;
+    this.launchAskRules = new Set(this.config.providerOptions.settings?.permissions?.ask ?? []);
     this.query = claudeQuery(
       { prompt: input.iterable, options },
       {
@@ -5242,6 +5278,10 @@ class ClaudeAgentSession implements AgentSession {
       actions: this.permissionActionsFor(kind, toolName, options.suggestions),
       metadata: Object.keys(metadata).length ? metadata : undefined,
     };
+
+    if (kind === "tool" && this.allowedInSession(request)) {
+      return { behavior: "allow", updatedInput: input };
+    }
 
     this.pushEvent({
       type: "permission_requested",

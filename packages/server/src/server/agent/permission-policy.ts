@@ -84,6 +84,21 @@ function stillAsks(askRule: string, rule: string): boolean {
   return prefix !== askSpecifier && specifierOf(rule).startsWith(prefix);
 }
 
+/** Whether the allow rule `allowRule` covers the calls `rule` names. */
+export function ruleAllows(allowRule: string, rule: string): boolean {
+  if (allowRule === rule) return true;
+  const tool = toolOf(rule);
+  if (tool.startsWith("mcp__")) {
+    const server = tool.split("__").slice(0, 2).join("__");
+    if (allowRule === server || allowRule === `${server}__*`) return true;
+  }
+  if (toolOf(allowRule) !== tool) return false;
+  if (allowRule === tool) return true;
+  const allowSpecifier = specifierOf(allowRule);
+  const prefix = allowSpecifier.replace(/(?::\*|\*+)$/, "");
+  return rule !== tool && prefix !== allowSpecifier && specifierOf(rule).startsWith(prefix);
+}
+
 export function allowRulesInPolicy(
   permissions: PermissionRules,
   rules: string[],
