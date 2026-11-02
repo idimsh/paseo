@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-3
 import type { AgentStreamEvent } from "../agent-sdk-types.js";
 import { parentAddressLabels } from "@getpaseo/protocol/agent-labels";
 import type { ActiveTurnBehavior, AgentSnapshotPayload } from "@getpaseo/protocol/messages";
@@ -43,6 +44,9 @@ export interface HostOperations {
   getStatus: HostOperation;
   getActivity: HostOperation;
   listAgents: HostOperation;
+  cancelAgent: HostOperation;
+  archiveAgent: HostOperation;
+  killAgent: HostOperation;
 }
 /** Connection authority at the host boundary, independent of child lifecycle. */
 export class HostObservationError extends Error {
@@ -330,6 +334,24 @@ export function createHostResolver(input: {
                 },
               ),
             });
+          },
+          async cancelAgent(args) {
+            // The destination runs the same command as the local tool and reports whether a run
+            // was in flight; it rejects an agent it does not hold live.
+            const { cancelled } = await client.cancelAgentRun(args.agentId as string);
+            // COMPAT(cancel-response-cancelled): a daemon before idimsh/paseo PC-3 omits
+            // `cancelled`; report its accepted request as success. Remove once both hosts run PC-3.
+            return result({ success: cancelled ?? true });
+          },
+          async archiveAgent(args) {
+            await client.archiveAgent(args.agentId as string);
+            return result({ success: true });
+          },
+          async killAgent(args, context) {
+            // Daemons expose no close RPC to each other. Archive cancels the running turn, then
+            // archives, so a remote kill ends "archived" where a local kill ends "closed".
+            const archived = await this.archiveAgent(args, context);
+            return result({ ...(archived.structuredContent as object), outcome: "archived" });
           },
           async listWorkspaces(args) {
             const { entries } = await client.fetchWorkspaces({

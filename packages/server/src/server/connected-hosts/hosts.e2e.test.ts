@@ -1543,6 +1543,82 @@ test(
   },
 );
 
+// Modified in idimsh/paseo: PC-3
+test(
+  "agent MCP stops agents on B by serverId and rejects agents a host does not know",
+  { timeout: 30000 },
+  async () => {
+    const a = await daemon();
+    const b = await daemon();
+    const { paseo } = await api(a);
+    await paseo.hosts.add({ connection: `127.0.0.1:${b.port}`, label: "Stop B" });
+    const directory = await online(paseo);
+    const serverId = directory.hosts[0]!.serverId!;
+    const workspace = await paseo.workspaces.create({
+      source: { kind: "directory", path: a.staticDir },
+    });
+    const parent = await workspace.agents.create({
+      config: { provider: "claude/claude-test" },
+      title: "Stop parent",
+    });
+    const mcp = new Client({ name: "remote-stop", version: "1" });
+    cleanup.push(() => mcp.close());
+    await mcp.connect(
+      new StreamableHTTPClientTransport(
+        new URL(`http://127.0.0.1:${a.port}/mcp/agents?callerAgentId=${parent.id}`),
+      ),
+    );
+    const call = (name: string, args: Record<string, unknown>) =>
+      mcp.callTool({ name, arguments: args });
+    const destination = await call("create_workspace", {
+      serverId,
+      isolation: "local",
+      path: b.staticDir,
+      title: "Stop workspace",
+    });
+    const remote = await call("create_agent", {
+      serverId,
+      workspaceId: (destination.structuredContent as { workspaceId: string }).workspaceId,
+      title: "B stop target",
+      provider: "claude/claude-test",
+      initialPrompt: "Wait to be stopped",
+      notifyOnFinish: false,
+    });
+    expect(remote.isError, JSON.stringify(remote)).not.toBe(true);
+    const remoteId = (remote.structuredContent as { agentId: string }).agentId;
+
+    const bApi = await api(b);
+    await bApi.client.waitForFinish(remoteId, 10000);
+
+    // The destination reports that no run was in flight (the PC-3 `cancelled` field).
+    const idleCancel = await call("cancel_agent", { serverId, agentId: remoteId });
+    expect(idleCancel.isError, JSON.stringify(idleCancel)).not.toBe(true);
+    expect(idleCancel.structuredContent).toMatchObject({ success: false, serverId });
+
+    const killed = await call("kill_agent", { serverId, agentId: remoteId });
+    expect(killed.isError, JSON.stringify(killed)).not.toBe(true);
+    expect(killed.structuredContent).toMatchObject({
+      success: true,
+      outcome: "archived",
+      serverId,
+    });
+    const archived = await bApi.client.fetchAgents({ filter: { includeArchived: true } });
+    expect(archived.entries.find((entry) => entry.agent.id === remoteId)?.agent.archivedAt).toEqual(
+      expect.any(String),
+    );
+
+    const unknownRemote = await call("kill_agent", { serverId, agentId: "no-such-agent" });
+    expect(unknownRemote.isError).toBe(true);
+    expect(unknownRemote.structuredContent).toMatchObject({ serverId });
+    const unknownLocal = await call("kill_agent", { agentId: "no-such-agent" });
+    expect(unknownLocal.isError).toBe(true);
+    expect(unknownLocal.structuredContent).toMatchObject({
+      serverId: directory.self.serverId,
+      error: "Agent no-such-agent not found",
+    });
+  },
+);
+
 test(
   "remote agent reports, local CLI sends and automatic completion reach the same recipient",
   { timeout: 30000 },

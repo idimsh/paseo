@@ -1,3 +1,5 @@
+<!-- Modified in idimsh/paseo: PC-3 -->
+
 # Connected hosts
 
 A saved host belongs to the daemon that stores it. The app's saved connections remain a separate list.
@@ -32,8 +34,10 @@ Trusted server plugins retain the authority of their runtime; they are not sandb
 ## Delegating agents
 
 Agent MCP discovers destination IDs with `list_hosts`. `create_workspace`, `list_workspaces`,
-`create_agent`, `send_agent_prompt`, `get_agent_status`, `get_agent_activity`, and `list_agents`
-accept `serverId`; omission selects the calling daemon. Remote creation requires a
+`create_agent`, `send_agent_prompt`, `get_agent_status`, `get_agent_activity`, `list_agents`,
+`cancel_agent`, `archive_agent` and `kill_agent` accept `serverId`; omission selects the calling
+daemon. Daemons have no close RPC between them, so a remote `kill_agent` archives the agent
+(idimsh/paseo PC-3). Remote creation requires a
 destination workspace and explicit provider/model. Caller filesystem defaults apply only on the
 calling daemon. Prompting a remote child acknowledges acceptance and uses the existing idle wait for
 finish notifications. Remote agent lists have no caller-directory default; pass `cwd` to filter them.

@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-3
 import { type WorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import type { AgentMessageDelivery } from "./agent/agent-messages/index.js";
 import { AgentDirectory } from "./agent/directory.js";
@@ -4833,7 +4834,7 @@ export class Session {
     this.sessionLogger.info({ agentId }, `Cancel request received for agent ${agentId}`);
 
     try {
-      await cancelAgentRunCommand(
+      const { cancelled } = await cancelAgentRunCommand(
         { agentManager: this.agentManager, logger: this.sessionLogger },
         agentId,
       );
@@ -4847,6 +4848,7 @@ export class Session {
             agentId,
             agent: payload,
             error: null,
+            cancelled,
           },
         });
       }

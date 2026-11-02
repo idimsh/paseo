@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-3
 import { registerPluginTools } from "./plugin-tools.js";
 import type { FinishSubscriptions, FinishRegistration } from "../finish-subscriptions/index.js";
 import type { AgentMessageDelivery } from "../agent-messages/index.js";
@@ -714,6 +715,9 @@ function createToolCatalog(
     ["get_agent_status", "getStatus"],
     ["get_agent_activity", "getActivity"],
     ["list_agents", "listAgents"],
+    ["cancel_agent", "cancelAgent"],
+    ["archive_agent", "archiveAgent"],
+    ["kill_agent", "killAgent"],
   ] as const satisfies ReadonlyArray<readonly [string, keyof HostOperations]>);
   const hostResolver = createHostResolver({
     serverId: options.serverId ?? "self",
@@ -732,6 +736,9 @@ function createToolCatalog(
       getStatus: (args, context) => localHostOperations.get("get_agent_status")!(args, context),
       getActivity: (args, context) => localHostOperations.get("get_agent_activity")!(args, context),
       listAgents: (args, context) => localHostOperations.get("list_agents")!(args, context),
+      cancelAgent: (args, context) => localHostOperations.get("cancel_agent")!(args, context),
+      archiveAgent: (args, context) => localHostOperations.get("archive_agent")!(args, context),
+      killAgent: (args, context) => localHostOperations.get("kill_agent")!(args, context),
     },
   });
   const registerTool = (
@@ -2245,19 +2252,24 @@ function createToolCatalog(
     "kill_agent",
     {
       title: "Kill agent",
-      description: "Terminate an agent session permanently.",
+      description:
+        "Terminate an agent session permanently. On this host the agent ends closed; on another host (serverId) it is archived, which stops its run first. Fails for an agent the host does not know.",
       inputSchema: {
         agentId: z.string(),
       },
       outputSchema: {
         success: z.boolean(),
+        outcome: z.enum(["closed", "archived"]),
       },
     },
     async ({ agentId }) => {
+      if (!agentManager.getAgent(agentId) && !(await agentStorage.get(agentId))) {
+        throw new PaseoToolInputError(`Agent ${agentId} not found`);
+      }
       await closeAgentCommand({ agentManager }, agentId);
       return {
         content: [],
-        structuredContent: ensureValidJson({ success: true }),
+        structuredContent: ensureValidJson({ success: true, outcome: "closed" }),
       };
     },
   );

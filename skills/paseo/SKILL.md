@@ -3,13 +3,15 @@ name: paseo
 description: Paseo reference for managing hosts, projects, workspaces, workspace scripts, agents, schedules, and heartbeats.
 ---
 
+<!-- Modified in idimsh/paseo: PC-3 -->
+
 Paseo is a remote daemon that manages coding agents, terminals. Control it through MCP tools or the CLI.
 
 ## Connected hosts
 
 Call `list_hosts` to discover the calling daemon (`self`) and its registered destinations (`hosts`). Use a destination's `serverId` for tool calls; labels are display names.
 
-`create_workspace`, `list_workspaces`, `create_agent`, `send_agent_prompt`, `get_agent_status`, `get_agent_activity`, and `list_agents` accept `serverId`. Omit it for the calling daemon. Other MCP tools operate on the calling daemon.
+`create_workspace`, `list_workspaces`, `create_agent`, `send_agent_prompt`, `get_agent_status`, `get_agent_activity`, `list_agents`, `cancel_agent`, `archive_agent`, and `kill_agent` accept `serverId`. Omit it for the calling daemon. Other MCP tools operate on the calling daemon.
 
 Keep an agent's `{ serverId, agentId }` together. For example, call `send_agent_prompt` with:
 
@@ -90,7 +92,9 @@ Agent-scoped `create_agent` defaults `notifyOnFinish` to true. Set it to `false`
 
 **`list_agents`** — filter by `cwd`, `statuses`, `sinceHours`, `includeArchived`; set `includeBackground: true` to include agents in background workspaces.
 
-**`archive_agent`** — `{ agentId }`. Interrupts if running, removes from active list.
+**`archive_agent`** — `{ agentId, serverId? }`. Interrupts if running, removes from active list.
+
+**`kill_agent`** — `{ agentId, serverId? }`. Stops an agent for good. On the calling daemon it ends `closed`; on another host it is archived (`outcome: "archived"`), which interrupts its run first. Fails for an agent the host does not know.
 
 ## Agent profiles and provider discovery
 

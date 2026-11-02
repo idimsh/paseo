@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-3
 import {
   HOST_ROUTE_OPCODE,
   encodeHostRouteFrame,
@@ -3924,6 +3925,14 @@ export class DaemonClient {
   }
 
   async cancelAgent(agentId: string): Promise<void> {
+    await this.cancelAgentRun(agentId);
+  }
+
+  /**
+   * Cancels the agent's run and reports whether one was in flight. `cancelled` is null when the
+   * daemon predates the field (before idimsh/paseo PC-3).
+   */
+  async cancelAgentRun(agentId: string): Promise<{ cancelled: boolean | null }> {
     const requestId = this.createRequestId();
     const message = SessionInboundMessageSchema.parse({
       type: "cancel_agent_request",
@@ -3947,6 +3956,7 @@ export class DaemonClient {
     if (payload.error) {
       throw new Error(payload.error);
     }
+    return { cancelled: payload.cancelled ?? null };
   }
 
   async setAgentMode(agentId: string, modeId: string): Promise<AgentProviderNotice | null> {

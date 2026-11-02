@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-3
 import {
   createFinishSubscriptions,
   createFinishObservation,
@@ -40,6 +41,8 @@ import type {
   ProviderSnapshotEntry,
 } from "./agent-sdk-types.js";
 import type { ProviderSnapshotManager } from "./provider-snapshot-manager.js";
+import type { ToolHosts } from "./host-operations/index.js";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { createProviderSnapshotManagerStub } from "../test-utils/session-stubs.js";
 import {
   AgentListItemPayloadSchema,
@@ -262,6 +265,7 @@ function buildAgentManagerSpies() {
     setTitle: vi.fn().mockResolvedValue(undefined),
     updateAgentMetadata: vi.fn().mockResolvedValue(undefined),
     archiveAgent: vi.fn().mockResolvedValue({ archivedAt: new Date().toISOString() }),
+    closeAgent: vi.fn().mockResolvedValue(undefined),
     notifyAgentState: vi.fn(),
     getAgent: vi.fn(),
     listAgents: vi.fn().mockReturnValue([]),
@@ -5854,6 +5858,143 @@ function daemonConfigStoreStub(agentProfiles?: AgentProfile[]): Pick<DaemonConfi
   });
   return { get: () => config };
 }
+
+describe("stop MCP tools across hosts", () => {
+  const logger = createTestLogger();
+  const LOCAL = "srv_local";
+  const REMOTE = "srv_remote";
+
+  /** A connected host whose daemon answers stop requests as `daemon` says; records each request. */
+  function connectedHost(daemon: {
+    archive?: (agentId: string) => Promise<{ archivedAt: string }>;
+    cancel?: (agentId: string) => Promise<{ cancelled: boolean | null }>;
+  }) {
+    const requests: string[] = [];
+    const client = {
+      archiveAgent: async (agentId: string) => {
+        requests.push(`archive:${agentId}`);
+        return daemon.archive!(agentId);
+      },
+      cancelAgentRun: async (agentId: string) => {
+        requests.push(`cancel:${agentId}`);
+        return daemon.cancel!(agentId);
+      },
+    };
+    const hosts = (): ToolHosts => ({
+      directory: async () => ({ hosts: [] }) as never,
+      use: async (serverId, action) => {
+        if (serverId !== REMOTE) throw new Error(`Unknown host ${serverId}`);
+        return action(client as unknown as DaemonClient);
+      },
+    });
+    return { hosts, requests };
+  }
+
+  async function stopTools(hosts?: () => ToolHosts) {
+    const deps = createTestDeps();
+    const server = await createAgentMcpServer({
+      agentManager: deps.agentManager,
+      agentStorage: deps.agentStorage,
+      providerSnapshotManager: createClaudeOnlyManager(),
+      serverId: LOCAL,
+      hosts,
+      logger,
+    });
+    return { deps, tool: (name: string) => registeredTool(server, name) };
+  }
+
+  it("kill_agent on another host archives the agent there and says so", async () => {
+    const host = connectedHost({ archive: async () => ({ archivedAt: "2026-11-02T00:00:00Z" }) });
+    const { tool } = await stopTools(host.hosts);
+    const response = await tool("kill_agent").handler({ agentId: "remote-1", serverId: REMOTE });
+    expect(response.isError).not.toBe(true);
+    expect(response.structuredContent).toEqual({
+      success: true,
+      outcome: "archived",
+      serverId: REMOTE,
+    });
+    expect(host.requests).toEqual(["archive:remote-1"]);
+  });
+
+  it("kill_agent on another host reports the destination's rejection of an unknown agent", async () => {
+    const host = connectedHost({
+      archive: async (agentId) => {
+        throw new Error(`Request failed: Agent not found: ${agentId}`);
+      },
+    });
+    const { tool } = await stopTools(host.hosts);
+    const response = await tool("kill_agent").handler({ agentId: "missing", serverId: REMOTE });
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent).toMatchObject({
+      serverId: REMOTE,
+      error: "Request failed: Agent not found: missing",
+    });
+  });
+
+  it("kill_agent on this host fails for an agent neither live nor stored", async () => {
+    const { tool, deps } = await stopTools();
+    deps.spies.agentManager.getAgent.mockReturnValue(null);
+    const response = await tool("kill_agent").handler({ agentId: "missing" });
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent).toMatchObject({
+      serverId: LOCAL,
+      error: "Agent missing not found",
+    });
+    expect(deps.spies.agentManager.closeAgent).not.toHaveBeenCalled();
+  });
+
+  it("kill_agent on this host still closes a stored agent that is not live", async () => {
+    const { tool, deps } = await stopTools();
+    deps.spies.agentManager.getAgent.mockReturnValue(null);
+    deps.spies.agentStorage.get.mockResolvedValue(createStoredRecord({ id: "stored-closed" }));
+    const response = await tool("kill_agent").handler({ agentId: "stored-closed" });
+    expect(response.isError).not.toBe(true);
+    expect(response.structuredContent).toEqual({
+      success: true,
+      outcome: "closed",
+      serverId: LOCAL,
+    });
+    expect(deps.spies.agentManager.closeAgent).toHaveBeenCalledWith("stored-closed");
+  });
+
+  it("archive_agent on another host archives it there", async () => {
+    const host = connectedHost({ archive: async () => ({ archivedAt: "2026-11-02T00:00:00Z" }) });
+    const { tool } = await stopTools(host.hosts);
+    const response = await tool("archive_agent").handler({ agentId: "remote-2", serverId: REMOTE });
+    expect(response.structuredContent).toEqual({ success: true, serverId: REMOTE });
+    expect(host.requests).toEqual(["archive:remote-2"]);
+  });
+
+  it("cancel_agent on another host reports what the destination cancelled, in one request", async () => {
+    const host = connectedHost({
+      cancel: async (agentId) => ({ cancelled: agentId === "running" }),
+    });
+    const { tool } = await stopTools(host.hosts);
+    expect(
+      (await tool("cancel_agent").handler({ agentId: "running", serverId: REMOTE }))
+        .structuredContent,
+    ).toEqual({ success: true, serverId: REMOTE });
+    expect(
+      (await tool("cancel_agent").handler({ agentId: "idle", serverId: REMOTE })).structuredContent,
+    ).toEqual({ success: false, serverId: REMOTE });
+    expect(host.requests).toEqual(["cancel:running", "cancel:idle"]);
+  });
+
+  it("cancel_agent on another host fails for an agent the destination does not hold", async () => {
+    const host = connectedHost({
+      cancel: async (agentId) => {
+        throw new Error(`Agent ${agentId} not found`);
+      },
+    });
+    const { tool } = await stopTools(host.hosts);
+    const response = await tool("cancel_agent").handler({ agentId: "missing", serverId: REMOTE });
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent).toMatchObject({
+      serverId: REMOTE,
+      error: "Agent missing not found",
+    });
+  });
+});
 
 describe("agent profile listing MCP tool", () => {
   const logger = createTestLogger();

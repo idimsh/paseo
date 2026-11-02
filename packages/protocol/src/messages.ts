@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-3
 import { AgentMessageSchema } from "./agent-message.js";
 import {
   HostsListRequestSchema,
@@ -4979,6 +4980,8 @@ export const CancelAgentResponseMessageSchema = z.object({
     agentId: z.string(),
     agent: AgentSnapshotPayloadSchema.nullable(),
     error: z.string().nullable().optional(),
+    /** Whether a run was in flight and was cancelled. Absent from daemons before idimsh/paseo PC-3. */
+    cancelled: z.boolean().optional(),
   }),
 });
 
