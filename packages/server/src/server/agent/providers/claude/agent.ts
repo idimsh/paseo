@@ -1,6 +1,13 @@
+// Modified in idimsh/paseo: PC-8
 import { setImmediate } from "node:timers/promises";
 import { ClaudeRuntimeSafety } from "./runtime-safety.js";
 import { validateProviderOptions } from "../../provider-options.js";
+import {
+  ALLOW_ALWAYS_ACTION_ID,
+  allowRulesInPolicy,
+  rulesForPermissionRequest,
+  toolRuleSuggestions,
+} from "../../permission-policy.js";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -1185,6 +1192,21 @@ function buildClaudeQuestionPermissionSummary(
 
 function getClaudeModeLabel(modeId: PermissionMode): string {
   return DEFAULT_MODES.find((mode) => mode.id === modeId)?.label ?? modeId;
+}
+
+// "Allow, don't ask again" (idimsh/paseo PC-8): offered on tool requests of a provider with a
+// permission policy, or when Claude suggests a rule to save.
+function buildClaudeToolPermissionActions(): AgentPermissionAction[] {
+  return [
+    { id: "reject", label: "Deny", behavior: "deny", variant: "danger", intent: "dismiss" },
+    { id: "accept", label: "Allow", behavior: "allow", variant: "primary" },
+    {
+      id: ALLOW_ALWAYS_ACTION_ID,
+      label: "Allow, don't ask again",
+      behavior: "allow",
+      variant: "secondary",
+    },
+  ];
 }
 
 function buildClaudePlanPermissionActions(
@@ -2827,6 +2849,38 @@ class ClaudeAgentSession implements AgentSession {
     this.cachedRuntimeInfo = null;
   }
 
+  private permissionActionsFor(
+    kind: AgentPermissionRequest["kind"],
+    toolName: string,
+    suggestions: AgentPermissionRequest["suggestions"],
+  ): AgentPermissionAction[] | undefined {
+    if (kind === "plan") return buildClaudePlanPermissionActions(this.planResumeMode);
+    if (kind !== "tool") return undefined;
+    const request = { name: toolName, suggestions };
+    const policy = this.config.providerOptions.settings?.permissions;
+    // Offered only where it would stop the prompts: the move must succeed in this session's policy.
+    const canSave = policy
+      ? allowRulesInPolicy(policy, rulesForPermissionRequest(request)).ok
+      : toolRuleSuggestions(request).length > 0;
+    return canSave ? buildClaudeToolPermissionActions() : undefined;
+  }
+
+  private hasPermissionPolicy(): boolean {
+    return this.config.providerOptions.settings?.permissions !== undefined;
+  }
+
+  async updatePermissionPolicy(permissions: Record<string, unknown>): Promise<void> {
+    const providerOptions = this.config.providerOptions;
+    this.config.providerOptions = {
+      ...providerOptions,
+      settings: {
+        ...providerOptions.settings,
+        permissions: permissions as NonNullable<ClaudeProviderOptions["settings"]>["permissions"],
+      },
+    };
+    await this.query?.applyFlagSettings({ permissions });
+  }
+
   getPendingPermissions(): AgentPermissionRequest[] {
     return Array.from(this.pendingPermissions.values()).map((entry) => entry.request);
   }
@@ -2945,10 +2999,21 @@ class ClaudeAgentSession implements AgentSession {
               pending.request.input ?? undefined,
             )
           : (response.updatedInput ?? pending.request.input ?? {});
+      // A provider policy is owned by the daemon (PC-8): nothing is saved to a settings file
+      // through Claude Code, whichever client answered; session-only updates still apply.
+      // Without a policy, "don't ask again" saves Claude's suggested rules for this tool.
+      const requestedUpdates =
+        response.selectedActionId === ALLOW_ALWAYS_ACTION_ID && !response.updatedPermissions
+          ? toolRuleSuggestions(pending.request)
+          : response.updatedPermissions;
       const result: PermissionResult = {
         behavior: "allow",
         updatedInput,
-        updatedPermissions: this.normalizePermissionUpdates(response.updatedPermissions),
+        updatedPermissions: this.normalizePermissionUpdates(
+          this.hasPermissionPolicy()
+            ? requestedUpdates?.filter((update) => update.destination === "session")
+            : requestedUpdates,
+        ),
       };
       pending.resolve(result);
     } else {
@@ -5174,7 +5239,7 @@ class ClaudeAgentSession implements AgentSession {
       suggestions: options.suggestions?.map((suggestion) => ({
         ...suggestion,
       })),
-      actions: kind === "plan" ? buildClaudePlanPermissionActions(this.planResumeMode) : undefined,
+      actions: this.permissionActionsFor(kind, toolName, options.suggestions),
       metadata: Object.keys(metadata).length ? metadata : undefined,
     };
 

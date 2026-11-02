@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-8
 import type {
   AgentFeature,
   AgentFeatureSelect,
@@ -671,6 +672,11 @@ export interface AgentUsageSession {
 }
 
 export interface AgentSession {
+  /**
+   * Replaces the session's permission policy (Claude Code `settings.permissions`) now and for its
+   * later launches. Offered by providers whose policy the daemon can change. (idimsh/paseo PC-8)
+   */
+  updatePermissionPolicy?(permissions: Record<string, unknown>): Promise<void>;
   usageSession?(): AgentUsageSession | null;
   readonly provider: AgentProvider;
   readonly id: string | null;

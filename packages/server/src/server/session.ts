@@ -1,4 +1,4 @@
-// Modified in idimsh/paseo: PC-3
+// Modified in idimsh/paseo: PC-3, PC-8
 import { type WorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import type { AgentMessageDelivery } from "./agent/agent-messages/index.js";
 import { AgentDirectory } from "./agent/directory.js";
@@ -73,6 +73,12 @@ import {
   resolveFirstAgentPromptTitle,
 } from "./agent/create-agent-title.js";
 import { respondToAgentPermission } from "./agent/permission-response.js";
+import {
+  ALLOW_ALWAYS_ACTION_ID,
+  type AllowAlwaysPlan,
+  commitAllowAlways,
+  planAllowAlways,
+} from "./agent/permission-policy.js";
 import type { VoiceCallerContext, VoiceSpeakHandler } from "./voice-types.js";
 import type { ScriptHealthState } from "./script-health-monitor.js";
 import { spawnWorkspaceScript } from "./worktree-bootstrap.js";
@@ -5180,6 +5186,18 @@ export class Session {
     response: AgentPermissionResponse,
   ): Promise<void> {
     try {
+      // Only a client session (web UI, CLI) may change a provider's permission policy; the MCP
+      // respond_to_permission tool never reaches here (idimsh/paseo PC-8). The check runs first,
+      // so a refusal leaves the request pending; the answer goes out before the config changes.
+      const allowAlways =
+        response.behavior === "allow" && response.selectedActionId === ALLOW_ALWAYS_ACTION_ID
+          ? planAllowAlways({
+              config: this.daemonConfigStore,
+              agentManager: this.agentManager,
+              agentId,
+              requestId,
+            })
+          : null;
       await respondToAgentPermission({
         agentManager: this.agentManager,
         agentId,
@@ -5187,6 +5205,7 @@ export class Session {
         response,
         logger: this.sessionLogger,
       });
+      if (allowAlways) await this.commitAllowAlways(allowAlways);
       // COMPAT(ownedSubscriptions): added in v0.8.0, remove after 2027-03-09.
       // Legacy clients consume the single domain resolution; modern request outcomes
       // are independent of whether this socket (or its logical Session) observes it.
@@ -5211,6 +5230,29 @@ export class Session {
         },
       });
       throw error;
+    }
+  }
+
+  /** The answer was already sent; a failure here is reported, never thrown at the client. */
+  private async commitAllowAlways(plan: AllowAlwaysPlan): Promise<void> {
+    const report = (content: string) =>
+      this.emit({
+        type: "activity_log",
+        payload: { id: uuidv4(), timestamp: new Date(), type: "error", content },
+      });
+    try {
+      const { failedAgentIds } = await commitAllowAlways({
+        config: this.daemonConfigStore,
+        agentManager: this.agentManager,
+        plan,
+      });
+      if (failedAgentIds.length > 0)
+        report(
+          `Saved ${plan.rules.join(", ")}; running agents not updated: ${failedAgentIds.join(", ")}`,
+        );
+    } catch (error) {
+      this.sessionLogger.error({ err: error, plan }, "Failed to save a permission rule");
+      report(`Allowed once; the rule was not saved: ${getErrorMessage(error)}`);
     }
   }
 

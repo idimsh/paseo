@@ -1,3 +1,5 @@
+<!-- Modified in idimsh/paseo: PC-8 -->
+
 # Custom Provider Configuration
 
 Paseo supports configuring custom agent providers through `config.json` (located at `$PASEO_HOME/config.json`, typically `~/.paseo/config.json`). You can extend built-in providers with different API backends, add ACP-compatible agents, set custom binaries, disable providers, and create multiple profiles for the same underlying provider.
@@ -59,6 +61,18 @@ base provider's options unless it sets its own options record.
 
 See the [SDK provider options guide](../public-docs/sdk/provider-options.md) for
 per-agent examples and provider-specific keys.
+
+A Claude provider whose `options.settings.permissions` holds Claude Code permission rules
+(`allow`, `ask`, `deny`) gets an "Allow, don't ask again" action on a tool permission request when
+saving its rule would stop the prompt. The rule is Claude's suggested rule for that tool, else the
+tool name. Answering with it from the app or the CLI first checks the move, then answers, then moves
+the rule out of `ask` and into `allow` in the provider entry whose options define the policy (an
+entry with its own `options` does not inherit its parent's), writes the daemon config, and applies
+the new policy to the running sessions that use it. It refuses, changing nothing, while another
+`ask` rule (for example `mcp__paseo__*` or `Bash(git:*)`) would keep prompting, and for an agent
+created with its own permission rules. An agent answering through the MCP `respond_to_permission`
+tool gives a one-time allow. Without a policy, the action saves Claude's suggested rules for the
+requested tool only. (idimsh/paseo PC-8)
 
 ---
 

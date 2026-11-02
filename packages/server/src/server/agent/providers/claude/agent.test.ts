@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-8
 import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -761,6 +762,166 @@ describe("ClaudeAgentSession features", () => {
       expect(session.getPendingPermissions()).toEqual([]);
     } finally {
       unsubscribe();
+      await session.close();
+    }
+  });
+
+  // Modified in idimsh/paseo: PC-8 ("Allow, don't ask again").
+  const SET_MODE = "mcp__paseo__set_agent_mode";
+  const SUGGESTION = {
+    type: "addRules" as const,
+    rules: [{ toolName: "Bash", ruleContent: "npm test:*" }],
+    behavior: "allow" as const,
+    destination: "localSettings" as const,
+  };
+
+  async function requestPermission(
+    providerOptions: Record<string, unknown> | undefined,
+    toolName: string,
+    suggestions?: unknown[],
+  ) {
+    const { queryFactory, queryMock, launches } = createQueryMock();
+    const session = await new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    }).createSession({
+      provider: "claude",
+      cwd: process.cwd(),
+      modeId: "default",
+      ...(providerOptions ? { providerOptions } : {}),
+    });
+    await session.startTurn("run the tool");
+    const canUseTool = queryFactory.mock.calls[0]?.[0].options.canUseTool;
+    if (!canUseTool) throw new Error("Expected canUseTool callback");
+    const result = canUseTool(
+      toolName,
+      { command: "npm test" },
+      { signal: new AbortController().signal, toolUseID: "tool-1", suggestions },
+    );
+    // Closing the session rejects a request the test did not answer.
+    result.catch(() => undefined);
+    const [request] = session.getPendingPermissions();
+    return { session, request: request!, result, queryMock, launches };
+  }
+
+  const policy = { settings: { permissions: { allow: [], ask: [SET_MODE], deny: ["Bash"] } } };
+
+  test("Allow, don't ask again is offered on a tool request from a provider with a permission policy", async () => {
+    const { session, request } = await requestPermission(policy, SET_MODE);
+    try {
+      expect(request.actions?.map((action) => action.id)).toEqual([
+        "reject",
+        "accept",
+        "allow_always",
+      ]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("Allow, don't ask again is not offered without a policy or a suggestion", async () => {
+    const { session, request } = await requestPermission(undefined, SET_MODE);
+    try {
+      expect(request.actions).toBeUndefined();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("never forwards a permission update for a policy agent; the daemon owns the policy", async () => {
+    const { session, request, result } = await requestPermission(policy, SET_MODE, [SUGGESTION]);
+    try {
+      await session.respondToPermission(request.id, {
+        behavior: "allow",
+        selectedActionId: "allow_always",
+        updatedPermissions: [SUGGESTION],
+      });
+      await expect(result).resolves.toMatchObject({
+        behavior: "allow",
+        updatedPermissions: undefined,
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("passes Claude's own suggestion through for an agent without a policy", async () => {
+    const { session, request, result } = await requestPermission(undefined, "Bash", [SUGGESTION]);
+    try {
+      expect(request.actions?.map((action) => action.id)).toContain("allow_always");
+      await session.respondToPermission(request.id, {
+        behavior: "allow",
+        selectedActionId: "allow_always",
+      });
+      await expect(result).resolves.toMatchObject({
+        behavior: "allow",
+        updatedPermissions: [SUGGESTION],
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("Allow, don't ask again is not offered when a broader ask rule would keep asking", async () => {
+    const { session, request } = await requestPermission(
+      { settings: { permissions: { ask: ["mcp__paseo__*", SET_MODE] } } },
+      SET_MODE,
+    );
+    try {
+      expect(request.actions).toBeUndefined();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("keeps session-only permission updates for a policy agent", async () => {
+    const { session, request, result } = await requestPermission(policy, SET_MODE);
+    const sessionUpdate = { ...SUGGESTION, destination: "session" as const };
+    try {
+      await session.respondToPermission(request.id, {
+        behavior: "allow",
+        updatedPermissions: [sessionUpdate, SUGGESTION],
+      });
+      await expect(result).resolves.toMatchObject({ updatedPermissions: [sessionUpdate] });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("saves only the requested tool's suggested rules for an agent without a policy", async () => {
+    const directory = {
+      type: "addDirectories",
+      directories: ["../other"],
+      destination: "localSettings",
+    };
+    const { session, request, result } = await requestPermission(undefined, "Bash", [
+      directory,
+      SUGGESTION,
+    ]);
+    try {
+      await session.respondToPermission(request.id, {
+        behavior: "allow",
+        selectedActionId: "allow_always",
+      });
+      await expect(result).resolves.toMatchObject({ updatedPermissions: [SUGGESTION] });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("applies a changed policy to the running query and to later launches", async () => {
+    const { session, request, queryMock } = await requestPermission(policy, SET_MODE);
+    const next = { allow: [SET_MODE], ask: [], deny: ["Bash"] };
+    try {
+      await session.updatePermissionPolicy!(next);
+      expect(queryMock.applyFlagSettings).toHaveBeenCalledWith({ permissions: next });
+      await session.respondToPermission(request.id, { behavior: "allow" });
+      expect(
+        (session as unknown as { config: { providerOptions: { settings: unknown } } }).config
+          .providerOptions.settings,
+      ).toEqual({ permissions: next });
+    } finally {
       await session.close();
     }
   });

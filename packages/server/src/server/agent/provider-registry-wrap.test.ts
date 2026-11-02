@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-8
 import { describe, expect, test } from "vitest";
 
 import type {
@@ -30,6 +31,7 @@ const OPTIONAL_AGENT_SESSION_METHOD_NAMES = [
   "revertFiles",
   "revertBoth",
   "tryHandleOutOfBand",
+  "updatePermissionPolicy",
 ] as const satisfies readonly OptionalAgentSessionMethodName[];
 
 type MissingOptionalAgentSessionMethod = Exclude<
@@ -168,6 +170,10 @@ class FakeSession implements AgentSession {
     this.recordedCalls.push("revertBoth");
   }
 
+  async updatePermissionPolicy() {
+    this.recordedCalls.push("updatePermissionPolicy");
+  }
+
   tryHandleOutOfBand(_prompt: AgentPromptInput) {
     this.recordedCalls.push("tryHandleOutOfBand");
     return {
@@ -199,6 +205,7 @@ describe("wrapSessionProvider", () => {
     await wrapped.revertBoth?.({ messageId: "message-1" });
     const handler = wrapped.tryHandleOutOfBand?.("/compact");
     await handler?.run({ emit: () => {} });
+    await wrapped.updatePermissionPolicy?.({ allow: [] });
 
     expect(session.steers).toEqual([
       { prompt: "follow-up", options: { expectedTurnId: "turn-1" } },
@@ -214,6 +221,7 @@ describe("wrapSessionProvider", () => {
       "revertBoth",
       "tryHandleOutOfBand",
       "tryHandleOutOfBand.run",
+      "updatePermissionPolicy",
     ]);
   });
   test("keeps provider-owned session values live", () => {

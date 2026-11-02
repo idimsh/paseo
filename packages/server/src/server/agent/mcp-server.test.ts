@@ -5996,6 +5996,29 @@ describe("stop MCP tools across hosts", () => {
   });
 });
 
+describe("respond_to_permission MCP tool", () => {
+  it("answers an agent's 'Allow, don't ask again' as a one-time allow (PC-8)", async () => {
+    const deps = createTestDeps();
+    const server = await createAgentMcpServer({
+      agentManager: deps.agentManager,
+      agentStorage: deps.agentStorage,
+      providerSnapshotManager: createClaudeOnlyManager(),
+      logger: createTestLogger(),
+    });
+
+    await registeredTool(server, "respond_to_permission").handler({
+      agentId: "child",
+      requestId: "request-1",
+      response: { behavior: "allow", selectedActionId: "allow_always" },
+    });
+
+    expect(deps.spies.agentManager.respondToPermission).toHaveBeenCalledWith("child", "request-1", {
+      behavior: "allow",
+      selectedActionId: undefined,
+    });
+  });
+});
+
 describe("agent profile listing MCP tool", () => {
   const logger = createTestLogger();
 

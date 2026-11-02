@@ -1,4 +1,4 @@
-// Modified in idimsh/paseo: PC-3
+// Modified in idimsh/paseo: PC-3, PC-8
 import { registerPluginTools } from "./plugin-tools.js";
 import type { FinishSubscriptions, FinishRegistration } from "../finish-subscriptions/index.js";
 import type { AgentMessageDelivery } from "../agent-messages/index.js";
@@ -83,6 +83,7 @@ import {
   waitForAgentRunStartWithTimeout,
 } from "../agent-prompt.js";
 import { respondToAgentPermission } from "../permission-response.js";
+import { ALLOW_ALWAYS_ACTION_ID } from "../permission-policy.js";
 import {
   archiveAgentCommand,
   cancelAgentRunCommand,
@@ -3277,7 +3278,11 @@ function createToolCatalog(
         agentManager,
         agentId,
         requestId,
-        response,
+        // An agent's answer is a one-time allow: "don't ask again" is the operator's (PC-8).
+        response:
+          response.behavior === "allow" && response.selectedActionId === ALLOW_ALWAYS_ACTION_ID
+            ? { ...response, selectedActionId: undefined }
+            : response,
         logger: childLogger,
       });
       return {

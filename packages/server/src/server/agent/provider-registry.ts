@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-8
 import type { Logger } from "pino";
 import type { ProviderOptions, ToolPolicy } from "@getpaseo/protocol/agent-types";
 
@@ -478,6 +479,7 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
     revertFiles: inner.revertFiles?.bind(inner),
     revertBoth: inner.revertBoth?.bind(inner),
     tryHandleOutOfBand: inner.tryHandleOutOfBand?.bind(inner),
+    updatePermissionPolicy: inner.updatePermissionPolicy?.bind(inner),
   } satisfies ForwardedAgentSession;
 }
 
