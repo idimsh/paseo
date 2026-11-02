@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-2
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -12,6 +13,9 @@ import {
   type ManagedProcessInspection,
   type ManagedProcessSnapshot,
   type ManagedProcessTable,
+  type LinuxProcReader,
+  birthTimeMatches,
+  parseLinuxProcStat,
   windowsPowerShellPath,
 } from "./managed-processes.js";
 import { spawnProcess } from "../../utils/spawn.js";
@@ -343,6 +347,98 @@ describe("system managed process table", () => {
         ],
       },
     ]);
+  });
+});
+
+// `comm` (field 2) may hold spaces and ")"; every later field is counted from the last ")".
+const TRICKY_STAT =
+  "4101 (my ) (worker x) S 1 4101 4101 0 -1 4194560 100 0 0 0 5 3 0 0 20 0 1 0 123456 1000 50";
+
+function fakeLinuxProc(stats: Record<number, string>, bootId = "boot-1"): LinuxProcReader {
+  return {
+    bootId: () => bootId,
+    readStat: async (pid) => stats[pid] ?? null,
+    listPids: async () => Object.keys(stats).map(Number),
+  };
+}
+
+describe("Linux process identity (PC-2)", () => {
+  test("parses ppid, session and start ticks after a command name holding spaces and )", () => {
+    expect(parseLinuxProcStat(TRICKY_STAT)).toEqual({
+      ppid: 1,
+      sessionId: 4101,
+      startTicks: "123456",
+    });
+    expect(parseLinuxProcStat("4101 (truncated")).toBeNull();
+  });
+
+  test("a process keeps its identity when the wall clock that ps lstart is built from shifts", async () => {
+    const commandRunner = new FakeCommandRunner([
+      { stdout: "Sat Jun 20 10:30:40 2026 node terminal-worker.js\n", stderr: "" },
+      { stdout: "Sat Jun 20 10:30:47 2026 node terminal-worker.js\n", stderr: "" },
+    ]);
+    const processTable = createSystemManagedProcessTable({
+      platform: "linux",
+      commandRunner,
+      linuxProc: fakeLinuxProc({ 4101: TRICKY_STAT }),
+    });
+
+    const recorded = await processTable.inspect(4101);
+    const later = await processTable.inspect(4101);
+
+    expect(recorded).toEqual({
+      status: "alive",
+      snapshot: {
+        pid: 4101,
+        commandLine: "node terminal-worker.js",
+        startedAt: "linux-start:boot-1:123456",
+        legacyStartedAt: "Sat Jun 20 10:30:40 2026",
+      },
+    });
+    expect(later.status === "alive" && later.snapshot.startedAt).toBe("linux-start:boot-1:123456");
+  });
+
+  test("the same start ticks in another boot are another process", async () => {
+    const inspect = (bootId: string) =>
+      createSystemManagedProcessTable({
+        platform: "linux",
+        commandRunner: new FakeCommandRunner([
+          { stdout: "Sat Jun 20 10:30:40 2026 node terminal-worker.js\n", stderr: "" },
+        ]),
+        linuxProc: fakeLinuxProc({ 4101: TRICKY_STAT }, bootId),
+      }).inspect(4101);
+    const first = await inspect("boot-1");
+    const second = await inspect("boot-2");
+    expect(first.status === "alive" && first.snapshot.startedAt).toBe("linux-start:boot-1:123456");
+    expect(second.status === "alive" && second.snapshot.startedAt).toBe(
+      "linux-start:boot-2:123456",
+    );
+  });
+
+  test("a record written before PC-2 still names its process by the lstart string", () => {
+    const snapshot = {
+      startedAt: "linux-start:boot-1:123456",
+      legacyStartedAt: "Sat Jun 20 10:30:40 2026",
+    };
+    expect(birthTimeMatches("Sat Jun 20 10:30:40 2026", snapshot)).toBe(true);
+    expect(birthTimeMatches("linux-start:boot-1:123456", snapshot)).toBe(true);
+    expect(birthTimeMatches("Sat Jun 20 10:30:47 2026", snapshot)).toBe(false);
+    expect(birthTimeMatches("linux-start:boot-1:999", snapshot)).toBe(false);
+    // Off Linux there is one identity, the lstart string itself.
+    expect(
+      birthTimeMatches("Sat Jun 20 10:30:40 2026", { startedAt: "Sat Jun 20 10:30:40 2026" }),
+    ).toBe(true);
+  });
+
+  test("a Linux process whose stat is gone is not found", async () => {
+    const processTable = createSystemManagedProcessTable({
+      platform: "linux",
+      commandRunner: new FakeCommandRunner([
+        { stdout: "Sat Jun 20 10:30:40 2026 node terminal-worker.js\n", stderr: "" },
+      ]),
+      linuxProc: fakeLinuxProc({}),
+    });
+    expect(await processTable.inspect(4101)).toEqual({ status: "not-found" });
   });
 });
 

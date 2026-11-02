@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-2
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -6,6 +7,7 @@ import { z } from "zod";
 import { writeJsonFileAtomic } from "../atomic-file.js";
 import { execCommand } from "../../utils/spawn.js";
 import type { ProcessTerminator, TreeKillTarget } from "../../utils/tree-kill.js";
+import { currentBootId } from "../pid-lock.js";
 
 /**
  * Windows PowerShell by its install path. Process identity must not depend on the caller's
@@ -55,6 +57,8 @@ export interface ManagedProcessSnapshot {
   pid: number;
   commandLine: string | null;
   startedAt: string | null;
+  /** Linux: what `ps -o lstart` printed, matched against records written before PC-2. */
+  legacyStartedAt?: string | null;
 }
 
 export type ManagedProcessInspection =
@@ -122,25 +126,108 @@ export function createManagedProcessRegistry(
   return new FileBackedManagedProcessRegistry(options);
 }
 
+/** Fields of `/proc/<pid>/stat` that process identity and the process table use. */
+export interface LinuxProcStat {
+  ppid: number;
+  sessionId: number;
+  startTicks: string;
+}
+
+export interface LinuxProcReader {
+  bootId(): string | null;
+  /** The contents of `/proc/<pid>/stat`; null when the process is gone. */
+  readStat(pid: number): Promise<string | null>;
+  listPids(): Promise<number[]>;
+}
+
+export const systemLinuxProcReader: LinuxProcReader = {
+  bootId: currentBootId,
+  async readStat(pid) {
+    try {
+      return await fs.readFile(`/proc/${pid}/stat`, "utf8");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ESRCH") return null;
+      throw error;
+    }
+  },
+  async listPids() {
+    return (await fs.readdir("/proc")).filter((name) => /^\d+$/.test(name)).map(Number);
+  },
+};
+
+/**
+ * Parses `/proc/<pid>/stat`. The command name (field 2) may hold spaces and ")", so fields are
+ * counted from the last ")": field n sits at index n - 3 of what follows it.
+ */
+export function parseLinuxProcStat(stat: string): LinuxProcStat | null {
+  const close = stat.lastIndexOf(")");
+  if (close < 0) return null;
+  const fields = stat
+    .slice(close + 1)
+    .trim()
+    .split(/\s+/);
+  const ppid = fields[1];
+  const sessionId = fields[3];
+  const startTicks = fields[19];
+  if (![ppid, sessionId, startTicks].every((field) => field !== undefined && /^\d+$/.test(field)))
+    return null;
+  return { ppid: Number(ppid), sessionId: Number(sessionId), startTicks: startTicks! };
+}
+
+/**
+ * Linux process birth identity: start time in clock ticks since boot (stat field 22), scoped by
+ * the boot ID. It is fixed for the process's lifetime. `ps -o lstart` is not: it adds the ticks
+ * to the wall-clock boot instant, which drifts on WSL2, so a live worker read as a stranger.
+ */
+export function linuxProcessIdentity(startTicks: string, bootId: string | null): string {
+  return `${LINUX_IDENTITY_PREFIX}${bootId ?? "unknown-boot"}:${startTicks}`;
+}
+
+const LINUX_IDENTITY_PREFIX = "linux-start:";
+
+/**
+ * Whether a recorded birth time names this process. A record written before PC-2 holds the
+ * `ps -o lstart` string; it is matched against that string, with its old drift limit, so a
+ * worker or helper started by an older build is still adopted or stopped instead of leaked.
+ */
+export function birthTimeMatches(
+  recorded: string,
+  snapshot: Pick<ManagedProcessSnapshot, "startedAt" | "legacyStartedAt">,
+): boolean {
+  if (snapshot.legacyStartedAt && !recorded.startsWith(LINUX_IDENTITY_PREFIX)) {
+    return recorded === snapshot.legacyStartedAt;
+  }
+  return recorded === snapshot.startedAt;
+}
+
 export function createSystemManagedProcessTable(options?: {
   platform?: NodeJS.Platform;
   commandRunner?: ManagedProcessCommandRunner;
+  linuxProc?: LinuxProcReader;
 }): ManagedProcessTable {
   return new SystemManagedProcessTable({
     platform: options?.platform ?? process.platform,
     commandRunner: options?.commandRunner ?? {
       exec: execCommand,
     },
+    linuxProc: options?.linuxProc ?? systemLinuxProcReader,
   });
 }
 
 class SystemManagedProcessTable implements ManagedProcessTable {
   private readonly platform: NodeJS.Platform;
   private readonly commandRunner: ManagedProcessCommandRunner;
+  private readonly linuxProc: LinuxProcReader;
 
-  constructor(options: { platform: NodeJS.Platform; commandRunner: ManagedProcessCommandRunner }) {
+  constructor(options: {
+    platform: NodeJS.Platform;
+    commandRunner: ManagedProcessCommandRunner;
+    linuxProc: LinuxProcReader;
+  }) {
     this.platform = options.platform;
     this.commandRunner = options.commandRunner;
+    this.linuxProc = options.linuxProc;
   }
 
   async inspect(pid: number): Promise<ManagedProcessInspection> {
@@ -180,14 +267,29 @@ class SystemManagedProcessTable implements ManagedProcessTable {
       return { status: "not-found" };
     }
 
-    const startedAt = line.slice(0, POSIX_LSTART_WIDTH).trim();
+    const lstart = line.slice(0, POSIX_LSTART_WIDTH).trim();
     const commandLine = line.slice(POSIX_LSTART_WIDTH).trim();
+    if (this.platform === "linux") {
+      const stat = await this.linuxProc.readStat(pid);
+      if (stat === null) return { status: "not-found" };
+      const parsed = parseLinuxProcStat(stat);
+      if (!parsed) return { status: "error", error: new Error(`Unreadable /proc/${pid}/stat`) };
+      return {
+        status: "alive",
+        snapshot: {
+          pid,
+          commandLine: commandLine || null,
+          startedAt: linuxProcessIdentity(parsed.startTicks, this.linuxProc.bootId()),
+          legacyStartedAt: lstart || null,
+        },
+      };
+    }
     return {
       status: "alive",
       snapshot: {
         pid,
         commandLine: commandLine || null,
-        startedAt: startedAt || null,
+        startedAt: lstart || null,
       },
     };
   }
@@ -387,7 +489,7 @@ function processIdentityMatches(
   snapshot: ManagedProcessSnapshot,
 ): boolean {
   if (record.identity.startedAt && snapshot.startedAt) {
-    if (record.identity.startedAt !== snapshot.startedAt) {
+    if (!birthTimeMatches(record.identity.startedAt, snapshot)) {
       return false;
     }
     return snapshot.commandLine ? commandLineMatchesRecord(record, snapshot.commandLine) : true;

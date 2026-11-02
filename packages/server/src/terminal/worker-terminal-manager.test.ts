@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-2
 import { afterEach, expect, it } from "vitest";
 import { isPlatform } from "../test-utils/platform.js";
 import { EventEmitter } from "node:events";
@@ -33,7 +34,10 @@ import type {
   TerminalWorkerRequest,
   TerminalWorkerToParentMessage,
 } from "./terminal-worker-protocol.js";
-import { createTerminalWorkerProcessInspector } from "./terminal-worker-processes.js";
+import {
+  createTerminalWorkerProcessInspector,
+  type TerminalWorkerProcessInspector,
+} from "./terminal-worker-processes.js";
 import {
   readUnconfirmedTerminalCleanup,
   reapTerminalWorkers,
@@ -144,7 +148,11 @@ const temporaryDirs: string[] = [];
 
 // A real detached worker in a throwaway home; afterEach closes its terminals and the worker.
 async function startRealWorkerManager(
-  options: { getTerminalActivityUrl?: () => string | null; paseoHome?: string } = {},
+  options: {
+    getTerminalActivityUrl?: () => string | null;
+    paseoHome?: string;
+    inspector?: TerminalWorkerProcessInspector;
+  } = {},
 ): Promise<DaemonTerminalManager> {
   const { paseoHome = createTemporaryHome(), ...rest } = options;
   return startWorkerTerminalManager({
@@ -1667,24 +1675,20 @@ it.skipIf(isPlatform("win32"))(
     );
 
     // The daemon's own retry fails the same way: only the full process table is unreadable.
-    const realPs = (process.env.PATH ?? "")
-      .split(delimiter)
-      .map((dir) => join(dir, "ps"))
-      .find((candidate) => existsSync(candidate));
-    if (!realPs) throw new Error("ps not found on PATH");
-    const shimDir = createTemporaryHome();
-    writeFileSync(
-      join(shimDir, "ps"),
-      `#!/bin/sh\nif [ "$1" = "-A" ]; then echo "process table unavailable" >&2; exit 1; fi\nexec ${realPs} "$@"\n`,
-      { mode: 0o755 },
-    );
-    const originalPath = process.env.PATH;
-    process.env.PATH = `${shimDir}${delimiter}${originalPath ?? ""}`;
-    try {
-      manager = await startRealWorkerManager({ paseoHome });
-    } finally {
-      process.env.PATH = originalPath;
-    }
+    // (On Linux the table comes from /proc, so a `ps` shim on PATH no longer reaches it.)
+    let tableUnavailable = true;
+    manager = await startRealWorkerManager({
+      paseoHome,
+      inspector: {
+        ...inspector,
+        listProcesses: () =>
+          tableUnavailable
+            ? Promise.reject(new Error("process table unavailable"))
+            : inspector.listProcesses(),
+      },
+    });
+    // Only the start-up retry sees the unreadable table, so the suite's cleanup still works.
+    tableUnavailable = false;
 
     expect(await liveWorkerPids(paseoHome)).toEqual([first.workerPid, second.workerPid].sort());
     await expect(

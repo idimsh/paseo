@@ -1,4 +1,8 @@
-import type { ManagedProcessInspection } from "../server/managed-processes/managed-processes.js";
+// Modified in idimsh/paseo: PC-2
+import {
+  birthTimeMatches,
+  type ManagedProcessInspection,
+} from "../server/managed-processes/managed-processes.js";
 import { TERMINAL_WORKER_MARKER_ARG, type TerminalWorkerRecord } from "./terminal-worker-record.js";
 
 // Who a pid named in a terminal worker record belongs to, before anything signals it.
@@ -52,7 +56,7 @@ function classifyBirth(
   if (!recordedStartedAt || !startedAt) {
     return { status: "unknown", reason: "birth time unavailable" };
   }
-  if (startedAt !== recordedStartedAt) {
+  if (!birthTimeMatches(recordedStartedAt, inspection.snapshot)) {
     return { status: "unrelated", reason: "pid reused by a process with another birth time" };
   }
   return { status: "owned" };

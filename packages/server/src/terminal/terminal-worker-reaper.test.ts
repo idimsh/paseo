@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-2
 import { afterEach, describe, expect, it } from "vitest";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -239,6 +240,34 @@ describe.skipIf(isPlatform("win32"))("terminal worker reaper", () => {
     expect(result.signaled).toEqual(expect.arrayContaining([program.pid!, childPid]));
     expect(existsSync(recordPath)).toBe(false);
   });
+
+  // Modified in idimsh/paseo: PC-2
+  it.skipIf(!isPlatform("linux"))(
+    "ends a program and its children that a record from before PC-2 names by its lstart string",
+    async () => {
+      const home = makeHome();
+      const { program, childPid } = await spawnProgramWithChild();
+      const inspection = await inspector.inspect(program.pid!);
+      if (inspection.status !== "alive" || !inspection.snapshot.legacyStartedAt) {
+        throw new Error("expected the lstart birth time of a live program");
+      }
+      const recordPath = writeRecord(home, {
+        pid: await goneProcessPid(),
+        terminals: [
+          { id: "t1", pid: program.pid!, startedAt: inspection.snapshot.legacyStartedAt },
+        ],
+      });
+
+      const result = await reapTerminalWorkers({ paseoHome: home, inspector });
+
+      await waitUntilGone(program.pid!);
+      await waitUntilGone(childPid);
+      expect(isAlive(program.pid!)).toBe(false);
+      expect(isAlive(childPid)).toBe(false);
+      expect(result.signaled).toEqual(expect.arrayContaining([program.pid!, childPid]));
+      expect(existsSync(recordPath)).toBe(false);
+    },
+  );
 
   it("never signals a live process that reuses the worker pid, but still ends its programs", async () => {
     const home = makeHome();

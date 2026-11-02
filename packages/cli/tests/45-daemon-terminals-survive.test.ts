@@ -1,4 +1,5 @@
 #!/usr/bin/env npx tsx
+// Modified in idimsh/paseo: PC-2
 
 /**
  * Terminals survive `paseo daemon restart` and `stop --keep-terminals`; `restart
@@ -190,6 +191,8 @@ async function plantRecordNaming(programPid: number): Promise<void> {
     socketPath: join(paseoHome, "planted-worker.sock"),
     secret: "planted-secret",
     terminals: [
+      // The `ps -o lstart` birth time a record from before idimsh/paseo PC-2 carries; on Linux
+      // the daemon still matches it (birthTimeMatches), so this also covers upgraded records.
       { id: "planted-terminal", pid: programPid, startedAt: await psField(programPid, "lstart") },
     ],
   };

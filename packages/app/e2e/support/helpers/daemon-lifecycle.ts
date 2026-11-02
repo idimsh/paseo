@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-2
 import { execFile, spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -141,6 +142,8 @@ export async function plantUnclosableTerminalProgram(
       paseoVersion: "0.0.0-test",
       socketPath: path.join(daemon.paseoHome, "planted-worker.sock"),
       secret: "planted-secret",
+      // The `ps -o lstart` birth time a record from before idimsh/paseo PC-2 carries; on Linux
+      // the daemon still matches it (birthTimeMatches), so this also covers upgraded records.
       terminals: [{ id: "planted-terminal", pid, startedAt: await psField(pid, "lstart") }],
     };
     await writeFile(

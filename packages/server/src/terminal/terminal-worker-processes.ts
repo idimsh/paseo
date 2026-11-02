@@ -1,17 +1,24 @@
+// Modified in idimsh/paseo: PC-2
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { execCommand } from "../utils/spawn.js";
 import {
   createSystemManagedProcessTable,
+  type LinuxProcReader,
+  linuxProcessIdentity,
   type ManagedProcessCommandRunner,
   type ManagedProcessInspection,
+  parseLinuxProcStat,
+  systemLinuxProcReader,
   windowsPowerShellPath,
 } from "../server/managed-processes/managed-processes.js";
 
-// Process inspection for terminal worker ownership. Birth times are compared as the strings
-// `ps -o lstart` and Win32_Process.CreationDate print, so every reader must print them the same
-// way: `ps` follows LC_TIME, and the worker, the daemon, the supervisor and the CLI can run
-// under different locales. Every `ps` here runs under LC_ALL=C.
+// Process inspection for terminal worker ownership. Birth times are compared as strings, so
+// every reader must produce them the same way. On Linux both readers use
+// `linuxProcessIdentity` (start ticks plus boot ID). Elsewhere they compare what
+// `ps -o lstart` and Win32_Process.CreationDate print: `ps` follows LC_TIME, and the worker,
+// the daemon, the supervisor and the CLI can run under different locales, so every `ps` here
+// runs under LC_ALL=C.
 
 const PS_TIMEOUT_MS = 15_000;
 const POSIX_LSTART_WIDTH = 24;
@@ -20,7 +27,7 @@ export interface ProcessTableEntry {
   pid: number;
   ppid: number;
   startedAt: string;
-  // POSIX session id where `ps` reports one (Linux). macOS `ps` has no session column.
+  // POSIX session id where the platform reports one (Linux, from /proc). macOS has none.
   sessionId: number | null;
 }
 
@@ -58,18 +65,24 @@ function createLocaleNeutralCommandRunner(): ManagedProcessCommandRunner {
 }
 
 export function createTerminalWorkerProcessInspector(
-  options: { platform?: NodeJS.Platform; commandRunner?: ManagedProcessCommandRunner } = {},
+  options: {
+    platform?: NodeJS.Platform;
+    commandRunner?: ManagedProcessCommandRunner;
+    linuxProc?: LinuxProcReader;
+  } = {},
 ): TerminalWorkerProcessInspector {
   const platform = options.platform ?? process.platform;
   const commandRunner = options.commandRunner ?? createLocaleNeutralCommandRunner();
-  const table = createSystemManagedProcessTable({ platform, commandRunner });
+  const linuxProc = options.linuxProc ?? systemLinuxProcReader;
+  const table = createSystemManagedProcessTable({ platform, commandRunner, linuxProc });
   return {
     reportsSessions: platform === "linux",
     inspect: (pid) => table.inspect(pid),
-    listProcesses: () =>
-      platform === "win32"
-        ? listWindowsProcesses(commandRunner)
-        : listPosixProcesses(commandRunner, platform),
+    listProcesses: () => {
+      if (platform === "win32") return listWindowsProcesses(commandRunner);
+      if (platform === "linux") return listLinuxProcesses(linuxProc);
+      return listPosixProcesses(commandRunner);
+    },
     readEnvironment: (pid) => readLinuxEnvironment(platform, pid),
   };
 }
@@ -91,28 +104,57 @@ async function readLinuxEnvironment(
   return raw.split("\0").filter((entry) => entry.length > 0);
 }
 
+const PROC_STAT_READ_BATCH = 64;
+
+async function listLinuxProcesses(linuxProc: LinuxProcReader): Promise<ProcessTableEntry[]> {
+  const bootId = linuxProc.bootId();
+  const pids = await linuxProc.listPids();
+  const entries: ProcessTableEntry[] = [];
+  for (let start = 0; start < pids.length; start += PROC_STAT_READ_BATCH) {
+    const batch = pids.slice(start, start + PROC_STAT_READ_BATCH);
+    // A process that exits before its read, or whose stat cannot be read, is left out, as
+    // `ps -A` leaves out what it cannot see; one unreadable pid must not hide the whole table.
+    const stats = await Promise.all(batch.map((pid) => linuxProc.readStat(pid).catch(() => null)));
+    for (const [index, stat] of stats.entries()) {
+      const parsed = stat === null ? null : parseLinuxProcStat(stat);
+      if (!parsed) continue;
+      entries.push({
+        pid: batch[index]!,
+        ppid: parsed.ppid,
+        sessionId: parsed.sessionId,
+        startedAt: linuxProcessIdentity(parsed.startTicks, bootId),
+      });
+    }
+  }
+  if (entries.length === 0) {
+    throw new Error("/proc listed no processes");
+  }
+  return entries;
+}
+
+/** Non-Linux POSIX (macOS): `ps` has no session column there. */
 async function listPosixProcesses(
   commandRunner: ManagedProcessCommandRunner,
-  platform: NodeJS.Platform,
 ): Promise<ProcessTableEntry[]> {
-  const withSession = platform === "linux";
-  const columns = withSession
-    ? ["-o", "pid=", "-o", "ppid=", "-o", "sid=", "-o", "lstart="]
-    : ["-o", "pid=", "-o", "ppid=", "-o", "lstart="];
-  const { stdout } = await commandRunner.exec("ps", ["-A", "-ww", ...columns]);
+  const { stdout } = await commandRunner.exec("ps", [
+    "-A",
+    "-ww",
+    "-o",
+    "pid=",
+    "-o",
+    "ppid=",
+    "-o",
+    "lstart=",
+  ]);
   const entries: ProcessTableEntry[] = [];
-  const leadingInts = withSession ? 3 : 2;
   for (const line of stdout.split("\n")) {
-    const match = line.match(
-      withSession ? /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/ : /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/,
-    );
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/);
     if (!match) continue;
-    const startedAt = match[leadingInts + 1].slice(0, POSIX_LSTART_WIDTH).trim();
     entries.push({
       pid: Number(match[1]),
       ppid: Number(match[2]),
-      sessionId: withSession ? Number(match[3]) : null,
-      startedAt,
+      sessionId: null,
+      startedAt: match[3].slice(0, POSIX_LSTART_WIDTH).trim(),
     });
   }
   if (entries.length === 0) {

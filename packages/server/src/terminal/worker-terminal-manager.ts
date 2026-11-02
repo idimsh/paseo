@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-2
 import { randomBytes, randomUUID } from "node:crypto";
 import { access } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
@@ -997,6 +998,8 @@ export interface StartWorkerTerminalManagerOptions {
   logger: Logger;
   getTerminalActivityUrl?: () => string | null;
   requestTimeoutMs?: number;
+  /** Process inspection; tests inject failures here. Defaults to the system inspector. */
+  inspector?: TerminalWorkerProcessInspector;
 }
 
 // The current worker plus one draining a previous protocol. Every live worker counts,
@@ -1025,7 +1028,7 @@ export async function startWorkerTerminalManager(
   options: StartWorkerTerminalManagerOptions,
 ): Promise<DaemonTerminalManager> {
   const logger = options.logger.child({ module: "terminal-worker" });
-  const inspector = createTerminalWorkerProcessInspector();
+  const inspector = options.inspector ?? createTerminalWorkerProcessInspector();
   const log = (message: string, fields?: Record<string, unknown>) => logger.info(fields, message);
   const live: LiveWorkerRecord[] = [];
   const toReap: string[] = [];

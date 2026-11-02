@@ -1,3 +1,4 @@
+// Modified in idimsh/paseo: PC-2
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import treeKill from "tree-kill";
@@ -162,6 +163,9 @@ export interface ReapTerminalWorkersOptions {
 interface Candidate {
   pid: number;
   startedAt: string;
+  // The birth identity read when the program was inspected. It differs from `startedAt` for a
+  // record written before idimsh/paseo PC-2, which holds the `ps -o lstart` string.
+  liveStartedAt: string | null;
   role: UnresolvedTerminalProcess["role"];
   terminalId: string;
   state: ProcessOwnership;
@@ -448,12 +452,14 @@ async function collectCandidates(
 ): Promise<CandidateDiscovery> {
   const candidates = new Map<number, Candidate>();
   for (const entry of record.terminals) {
+    const inspection = await inspector.inspect(entry.pid);
     candidates.set(entry.pid, {
       pid: entry.pid,
       startedAt: entry.startedAt,
+      liveStartedAt: inspection.status === "alive" ? inspection.snapshot.startedAt : null,
       role: "terminal program",
       terminalId: entry.id,
-      state: classifyTerminalProgramProcess(entry, await inspector.inspect(entry.pid)),
+      state: classifyTerminalProgramProcess(entry, inspection),
       descendantsUnconfirmed: null,
     });
   }
@@ -482,7 +488,7 @@ async function collectCandidates(
   }
   for (const root of roots) {
     const inTable = snapshot.find((entry) => entry.pid === root.pid);
-    if (inTable && inTable.startedAt !== root.startedAt) {
+    if (inTable && inTable.startedAt !== (root.liveStartedAt ?? root.startedAt)) {
       // The program ended and its pid was reused before the snapshot: what is below that pid
       // now belongs to someone else, and the old session ended with every member of it.
       log("Not walking a terminal program pid reused before the process table was read", {
@@ -515,6 +521,7 @@ async function collectCandidates(
       candidates.set(descendant.pid, {
         pid: descendant.pid,
         startedAt: descendant.startedAt,
+        liveStartedAt: descendant.startedAt,
         role: "terminal program",
         terminalId: root.terminalId,
         state: { status: "owned" },
